@@ -304,7 +304,10 @@ func percentOf(part, total int64) float64 {
 }
 
 func pct(p float64) string {
-	if p > 0 && p < 1 {
+	switch {
+	case p > 0 && p < 0.1:
+		return "<0.1%"
+	case p > 0 && p < 1:
 		return fmt.Sprintf("%.1f%%", p)
 	}
 	return fmt.Sprintf("%.0f%%", p)

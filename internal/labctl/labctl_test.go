@@ -299,6 +299,14 @@ media    jurre  10       1.0G  -      -
 	}
 }
 
+func TestPct(t *testing.T) {
+	for p, want := range map[float64]string{0: "0%", 0.02: "<0.1%", 0.5: "0.5%", 19.6: "20%", 100: "100%"} {
+		if got := pct(p); got != want {
+			t.Errorf("pct(%v) = %s, want %s", p, got, want)
+		}
+	}
+}
+
 func TestBytesHuman(t *testing.T) {
 	for b, want := range map[int64]string{999: "999B", 1500: "1.5K", 256060514304: "256G", 1000204886016: "1.0T", 36e9: "36G"} {
 		if got := bytesHuman(b); got != want {

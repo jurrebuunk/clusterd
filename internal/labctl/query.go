@@ -24,7 +24,11 @@ func cmdStatus(e *env, args []string) error {
 	}
 	section := ""
 	if len(args) == 1 {
-		section = strings.TrimSuffix(args[0], "s") + "s"
+		aliases := map[string]string{"host": "hosts", "vm": "vms", "node": "nodes", "vip": "vips"}
+		section = args[0]
+		if full, ok := aliases[section]; ok {
+			section = full
+		}
 		if !slices.Contains(statusSections, section) {
 			return usageErr("unknown section %q (want %s)", args[0], strings.Join(statusSections, ", "))
 		}

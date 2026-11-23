@@ -103,6 +103,11 @@ func TestEndToEnd(t *testing.T) {
 	if code, out, _ := run(t, "", "--json", "status"); code != 0 || !strings.Contains(out, `"site": "lab"`) {
 		t.Fatalf("status --json: %d %q", code, out)
 	}
+	for _, sec := range []string{"ceph", "vm", "nodes"} {
+		if code, out, errs := run(t, "", "status", sec); code != 0 || strings.HasPrefix(out, "HOST") {
+			t.Fatalf("status %s: %d %q %q", sec, code, out, errs)
+		}
+	}
 	if code, out, _ := run(t, "", "status"); code != 0 || !strings.HasPrefix(out, "HOST") {
 		t.Fatalf("status: %d %q", code, out)
 	}

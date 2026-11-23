@@ -8,6 +8,12 @@ site-neutral command-line client. Two programs from one repo: the hosts run
 highly available endpoint, `https://api.lan.buunk.org`, and is the single
 authenticated way to see and manage the platform.
 
-**Status:** planning. Start with [PLAN.md](PLAN.md).
+[![Release](https://img.shields.io/github/v/release/jurrebuunk/clusterd?include_prereleases&sort=semver)](https://github.com/jurrebuunk/clusterd/releases)
+[![Release workflow](https://github.com/jurrebuunk/clusterd/actions/workflows/release.yml/badge.svg)](https://github.com/jurrebuunk/clusterd/actions/workflows/release.yml)
+
+**Status:** planning; the road to v1 is in [PLAN.md](PLAN.md). Releases
+(binaries for `clusterd` and `labctl`) are published on
+[GitHub Releases](https://github.com/jurrebuunk/clusterd/releases) from
+version tags.
 
 Handbook: <https://jurrebuunk.github.io/nix-hgd1-cluster/concepts/api/>

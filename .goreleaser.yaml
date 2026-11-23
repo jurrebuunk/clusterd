@@ -1,0 +1,81 @@
+# Release packaging for clusterd and labctl. Run by .github/workflows/release.yml
+# on a version tag; try it locally with `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: clusterd
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  # The server only runs on the hypervisors (x86_64 NixOS).
+  - id: clusterd
+    main: ./cmd/clusterd
+    binary: clusterd
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: &ldflags
+      - -s -w
+      - -X github.com/jurrebuunk/clusterd/internal/version.Version={{ .Version }}
+      - -X github.com/jurrebuunk/clusterd/internal/version.Commit={{ .ShortCommit }}
+      - -X github.com/jurrebuunk/clusterd/internal/version.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  # The CLI runs wherever I am: Linux laptops and macOS.
+  - id: labctl
+    main: ./cmd/labctl
+    binary: labctl
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: *ldflags
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: clusterd
+    ids: [clusterd]
+    name_template: "clusterd_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files: [LICENSE*, README.md]
+  - id: labctl
+    ids: [labctl]
+    name_template: "labctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files: [LICENSE*, README.md]
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+source:
+  enabled: true
+  name_template: "clusterd_{{ .Version }}_source"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev+{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^ci:"
+      - "^chore:"
+      - "^Merge "
+
+release:
+  # v1.0.0-rc.1 and friends are marked as pre-release automatically.
+  prerelease: auto
+  name_template: "{{ .Tag }}"
+  footer: |
+    **Install**
+
+    - Nix: `nix run github:jurrebuunk/clusterd/{{ .Tag }}#labctl -- --help`
+    - Binary: download `labctl_{{ .Version }}_<os>_<arch>.tar.gz` below and check it against `checksums.txt`.
+    - Cluster: in `nix-hgd1-cluster`, point `inputs.clusterd.url` at `github:jurrebuunk/clusterd/{{ .Tag }}` and deploy host by host.

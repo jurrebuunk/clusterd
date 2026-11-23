@@ -1,0 +1,55 @@
+name: Release
+
+# Push a tag like v0.1.0 or v1.0.0-rc.1 to publish a GitHub release with
+# clusterd and labctl binaries, checksums and build provenance.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write      # create the release and upload assets
+  id-token: write      # sign the provenance attestation
+  attestations: write  # store it on GitHub
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # GoReleaser needs the tags for the changelog
+
+      - name: Tag matches VERSION
+        run: |
+          want="v$(cat VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match VERSION ($want)"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Build and publish
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-checksums: dist/checksums.txt

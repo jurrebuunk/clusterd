@@ -1,0 +1,149 @@
+# services.clusterd: the platform API as a hardened systemd service. The
+# cluster repo sets the options; nothing site-specific lives here.
+self:
+{ config, lib, pkgs, ... }:
+let
+  cfg = config.services.clusterd;
+  toml = pkgs.formats.toml { };
+  credDir = "/run/credentials/clusterd.service";
+
+  # Secrets reach the service as systemd credentials, never through the store.
+  credentials =
+    { tokens = cfg.tokensFile; }
+    // lib.optionalAttrs (cfg.kubeconfigFile != null) { kubeconfig = cfg.kubeconfigFile; }
+    // lib.optionalAttrs (cfg.ceph.keyringFile != null) { ceph-keyring = cfg.ceph.keyringFile; };
+
+  settings = lib.recursiveUpdate cfg.settings (
+    {
+      tokens_file = "${credDir}/tokens";
+    }
+    // lib.optionalAttrs (cfg.kubeconfigFile != null) {
+      kubernetes.kubeconfig = "${credDir}/kubeconfig";
+    }
+    // lib.optionalAttrs (cfg.ceph.keyringFile != null) {
+      ceph = {
+        command = lib.getExe' cfg.ceph.package "ceph";
+        id = cfg.ceph.id;
+        keyring = "${credDir}/ceph-keyring";
+      };
+    }
+  );
+in
+{
+  options.services.clusterd = {
+    enable = lib.mkEnableOption "clusterd, the platform API";
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.clusterd;
+      defaultText = lib.literalExpression "clusterd.packages.\${system}.clusterd";
+      description = "The clusterd package.";
+    };
+
+    settings = lib.mkOption {
+      type = toml.type;
+      default = { };
+      description = ''
+        clusterd's config.toml (see internal/config/config.go): site, host,
+        listen, metrics_listen, server_name, tls, hosts, vips, vms, limits.
+        tokens_file, kubernetes and ceph are set from the options below.
+      '';
+    };
+
+    tokensFile = lib.mkOption {
+      type = lib.types.path;
+      description = ''
+        File with one "<name> <scope> sha256:<hex>" line per token (from
+        `labctl token new`). Read at start and on reload.
+      '';
+    };
+
+    kubeconfigFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "Kubeconfig with a ServiceAccount token and inline CA, for node status.";
+    };
+
+    ceph = {
+      keyringFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Keyring of a read-only Ceph client (mon 'allow r'), for cluster health.";
+      };
+      id = lib.mkOption {
+        type = lib.types.str;
+        default = "clusterd";
+        description = "Ceph client name, without the client. prefix.";
+      };
+      package = lib.mkPackageOption pkgs "ceph" { };
+    };
+
+    extraGroups = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Extra groups for the service, e.g. to read a TLS certificate.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    # A fixed user: polkit rules (v1.0 actions) need a stable name.
+    users.users.clusterd = {
+      isSystemUser = true;
+      group = "clusterd";
+      description = "clusterd platform API";
+    };
+    users.groups.clusterd = { };
+
+    environment.etc."clusterd/config.toml".source = toml.generate "clusterd.toml" settings;
+
+    systemd.services.clusterd = {
+      description = "clusterd platform API";
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ];
+      restartTriggers = [ config.environment.etc."clusterd/config.toml".source ];
+      # systemctl for VM state; the Ceph CLI is called by absolute path.
+      path = [ config.systemd.package ];
+      serviceConfig = {
+        ExecStartPre = "${lib.getExe cfg.package} --config /etc/clusterd/config.toml --check";
+        ExecStart = "${lib.getExe cfg.package} --config /etc/clusterd/config.toml";
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
+        Restart = "on-failure";
+        RestartSec = 2;
+        User = "clusterd";
+        Group = "clusterd";
+        SupplementaryGroups = cfg.extraGroups;
+        LoadCredential = lib.mapAttrsToList (name: path: "${name}:${path}") credentials;
+
+        # Port 443 without root.
+        AmbientCapabilities = [ "CAP_NET_BIND_SERVICE" ];
+        CapabilityBoundingSet = [ "CAP_NET_BIND_SERVICE" ];
+        NoNewPrivileges = true;
+
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        ProtectHostname = true;
+        ProtectClock = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        ProtectProc = "default";
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" "AF_NETLINK" ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        LockPersonality = true;
+        RemoveIPC = true;
+        SystemCallArchitectures = "native";
+        SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
+        UMask = "0077";
+        # Ceph's CLI is Python and keeps a small cache.
+        CacheDirectory = "clusterd";
+        Environment = [ "HOME=/var/cache/clusterd" ];
+      };
+    };
+  };
+}

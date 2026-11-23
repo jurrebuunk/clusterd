@@ -1,0 +1,289 @@
+openapi: 3.1.0
+info:
+  title: clusterd
+  version: 0.1.0
+  summary: Platform API of the homelab
+  description: |
+    One stateless instance per hypervisor behind a highly available address.
+    Every endpoint except /v1/health needs `Authorization: Bearer <token>`.
+    Scopes nest: manage ⊃ operator ⊃ read. Errors are `{"error": "..."}`.
+    Handbook: https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/
+servers:
+  - url: https://api.lan.buunk.org
+security:
+  - bearer: []
+
+paths:
+  /v1/health:
+    get:
+      summary: This instance serves requests (Keepalived's check)
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /v1/whoami:
+    get:
+      summary: The calling token, and which instance answered
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Whoami" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/node:
+    get:
+      summary: Facts about the answering host only (used by /v1/status on peers)
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status:
+    get:
+      summary: Hosts, VMs, k3s nodes, Ceph health and VIP owners
+      description: |
+        Asks every peer's /v1/node with the caller's own token. Parts that fail
+        are reported in place (unreachable host, k3s error, ceph error); the
+        call itself still succeeds.
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/metrics/query:
+    get:
+      summary: Instant query (VictoriaMetrics /api/v1/query)
+      x-scope: read
+      parameters:
+        - { $ref: "#/components/parameters/PromQuery" }
+        - { name: time, in: query, schema: { type: string } }
+      # Proxied: the store's own status and body, this host's store first,
+      # peers on connection errors and 5xx.
+      responses: &proxied
+        "200": { description: The store's response }
+        "400": { description: The store rejected the query }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /v1/metrics/query_range:
+    get:
+      summary: Range query (VictoriaMetrics /api/v1/query_range)
+      x-scope: read
+      parameters:
+        - { $ref: "#/components/parameters/PromQuery" }
+        - { name: start, in: query, required: true, schema: { type: string } }
+        - { name: end, in: query, schema: { type: string } }
+        - { name: step, in: query, schema: { type: string } }
+      responses: *proxied
+  /v1/metrics/series:
+    get:
+      summary: Series matching selectors (VictoriaMetrics /api/v1/series)
+      x-scope: read
+      responses: *proxied
+  /v1/metrics/labels:
+    get:
+      summary: Label names (VictoriaMetrics /api/v1/labels)
+      x-scope: read
+      responses: *proxied
+  /v1/metrics/label/{name}/values:
+    get:
+      summary: Values of one label (VictoriaMetrics /api/v1/label/{name}/values)
+      x-scope: read
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[a-zA-Z_][a-zA-Z0-9_]*$" }
+      responses: *proxied
+
+  /v1/logs/query:
+    get:
+      summary: LogsQL search, or follow with follow=1
+      description: |
+        Without follow: VictoriaLogs /select/logsql/query, JSON lines; a missing
+        `limit` defaults to the server's logs_limit (1000). With follow=1:
+        /select/logsql/tail, streamed until the client disconnects or the
+        server's follow_max (1h) passes.
+      x-scope: read
+      parameters:
+        - { name: query, in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: follow, in: query, schema: { type: boolean } }
+      responses: *proxied
+  /v1/logs/hits:
+    get:
+      summary: Hit counts over time (VictoriaLogs /select/logsql/hits)
+      x-scope: read
+      responses: *proxied
+  /v1/logs/streams:
+    get:
+      summary: Log streams (VictoriaLogs /select/logsql/streams)
+      x-scope: read
+      responses: *proxied
+
+  /v1/actions/{path}:
+    description: Reserved for actions (v1.0); needs at least operator scope.
+    get:
+      x-scope: operator
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      responses:
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: A token from `labctl token new`, format lab_<43 base64url chars>.
+
+  parameters:
+    PromQuery:
+      name: query
+      in: query
+      required: true
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Token missing or invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Token valid, scope too low
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such endpoint or action
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadGateway:
+      description: No monitoring store answered
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Health:
+      type: object
+      properties:
+        status: { type: string, const: ok }
+    Whoami:
+      type: object
+      properties:
+        site: { type: string }
+        host: { type: string, description: Instance that answered }
+        name: { type: string, description: Token name }
+        scope: { type: string, enum: [read, operator, manage] }
+        version: { type: string, description: clusterd version }
+    StoreHealth:
+      type: object
+      properties:
+        name: { type: string, enum: [victoriametrics, victorialogs] }
+        ok: { type: boolean }
+    Node:
+      type: object
+      properties:
+        host: { type: string }
+        version: { type: string }
+        uptime_seconds: { type: integer }
+        load1: { type: number }
+        mem_total_bytes: { type: integer }
+        mem_available_bytes: { type: integer }
+        vips: { type: array, items: { type: string }, description: Names of VIPs bound here }
+        vms:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              active: { type: string, description: systemd ActiveState }
+              sub: { type: string, description: systemd SubState }
+        stores: { type: array, items: { $ref: "#/components/schemas/StoreHealth" } }
+        errors: { type: array, items: { type: string } }
+    Status:
+      type: object
+      properties:
+        site: { type: string }
+        generated_at: { type: string, format: date-time }
+        served_by: { type: string }
+        hosts:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              reachable: { type: boolean }
+              version: { type: string }
+              uptime_seconds: { type: integer }
+              load1: { type: number }
+              mem_used_percent: { type: number }
+              stores: { type: array, items: { $ref: "#/components/schemas/StoreHealth" } }
+              error: { type: string }
+        vms:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              host: { type: string }
+              state: { type: string, enum: [running, starting, stopped, failed, missing, disabled, unknown] }
+        k3s:
+          type: object
+          properties:
+            reachable: { type: boolean }
+            error: { type: string }
+            nodes:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  ready: { type: boolean }
+                  schedulable: { type: boolean }
+                  roles: { type: array, items: { type: string } }
+                  version: { type: string }
+                  zone: { type: string }
+        ceph:
+          type: object
+          properties:
+            health: { type: string }
+            checks: { type: array, items: { type: string } }
+            osds_total: { type: integer }
+            osds_up: { type: integer }
+            osds_in: { type: integer }
+            pgs_total: { type: integer }
+            pgs_active_clean: { type: integer }
+            error: { type: string }
+        vips:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              address: { type: string }
+              owners: { type: array, items: { type: string }, description: "More than one: split brain" }

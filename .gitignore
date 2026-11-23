@@ -1,0 +1,14 @@
+# Build output
+/dist/
+/result*
+/clusterd
+/labctl
+
+# Local configs and tokens while developing
+*.toml.local
+/tokens*
+
+# Editors
+.idea/
+.vscode/
+*.swp

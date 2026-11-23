@@ -325,7 +325,7 @@ so `scripts/vm.sh` and `scripts/k3s-roll.sh` can be deleted.
       wait until all PGs are clean.
 - [x] Maintenance is Ceph's per-host `noout` flag, so it survives the reboot
       and `labctl status host` shows `Up,Maintenance` without extra state.
-- [ ] The Ceph key may run `osd set-group` and `osd unset-group`, nothing
+- [x] The Ceph key may run `osd set-group` and `osd unset-group`, nothing
       else that writes.
 - [x] `labctl host maintenance <host> [--reboot]`, `labctl host resume <host>`.
 
@@ -345,8 +345,7 @@ so `scripts/vm.sh` and `scripts/k3s-roll.sh` can be deleted.
 **Cluster repo and docs**
 
 - [x] Pin `v1.1.0`; polkit reboot rule on.
-- [ ] The Ceph cap (`osd set-group`/`unset-group`); until then host
-      maintenance stops at the `noout` step.
+- [x] The Ceph cap (`osd set-group`/`unset-group`).
 - [x] Delete `scripts/vm.sh` and `scripts/k3s-roll.sh`; the handbook uses
       `labctl vm stop|start|roll`, `labctl node uncordon`,
       `labctl host maintenance|resume` and `labctl health`.

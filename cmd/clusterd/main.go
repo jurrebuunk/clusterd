@@ -17,7 +17,9 @@ import (
 
 	"github.com/VictoriaMetrics/metrics"
 
+	"github.com/jurrebuunk/clusterd/internal/actions"
 	"github.com/jurrebuunk/clusterd/internal/auth"
+	"github.com/jurrebuunk/clusterd/internal/cmdrun"
 	"github.com/jurrebuunk/clusterd/internal/config"
 	"github.com/jurrebuunk/clusterd/internal/kube"
 	"github.com/jurrebuunk/clusterd/internal/server"
@@ -76,7 +78,12 @@ func run(cfgPath string, checkOnly bool, log *slog.Logger) error {
 		return nil
 	}
 
-	srv, err := server.New(cfg, tokens, status.New(cfg, kc, log), log)
+	var eng *actions.Engine
+	if kc != nil {
+		eng = &actions.Engine{Cfg: cfg, Kube: kc, Run: cmdrun.Run, Log: log, Timing: actions.DefaultTiming}
+	}
+	collector := status.New(cfg, kc, log)
+	srv, err := server.New(cfg, tokens, collector, eng, log)
 	if err != nil {
 		return err
 	}
@@ -96,6 +103,7 @@ func run(cfgPath string, checkOnly bool, log *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go collector.Run(ctx)
 	errc := make(chan error, len(cfg.Listen)+1)
 
 	for _, addr := range cfg.Listen {

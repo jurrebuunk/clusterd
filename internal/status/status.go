@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jurrebuunk/clusterd/internal/api"
+	"github.com/jurrebuunk/clusterd/internal/cmdrun"
 	"github.com/jurrebuunk/clusterd/internal/config"
 	"github.com/jurrebuunk/clusterd/internal/kube"
 )
@@ -32,7 +33,19 @@ type Collector struct {
 	run            func(ctx context.Context, name string, args ...string) ([]byte, error)
 	interfaceAddrs func() ([]net.Addr, error)
 	now            func() time.Time
+
+	// Ceph health is slow to ask (the CLI takes about half a second), so it is
+	// refreshed in the background and /v1/status answers from this copy.
+	cephMu       sync.Mutex
+	cephVal      api.CephStatus
+	cephInflight chan struct{}
 }
+
+// CephRefresh is how often the background loop asks Ceph.
+const CephRefresh = 10 * time.Second
+
+// cephStale is when a cached answer is no longer trusted.
+const cephStale = 60 * time.Second
 
 // New builds a collector. kc may be nil when no kubeconfig is configured.
 func New(cfg *config.Config, kc *kube.Client, log *slog.Logger) *Collector {
@@ -50,7 +63,7 @@ func New(cfg *config.Config, kc *kube.Client, log *slog.Logger) *Collector {
 		},
 		plain:          &http.Client{Timeout: 5 * time.Second},
 		procRoot:       "/proc",
-		run:            runCommand,
+		run:            cmdrun.Run,
 		interfaceAddrs: net.InterfaceAddrs,
 		now:            time.Now,
 	}
@@ -76,7 +89,7 @@ func (c *Collector) Status(ctx context.Context, token string) api.Status {
 		})
 	}
 	wg.Go(func() { st.K3s = c.k3s(ctx) })
-	wg.Go(func() { st.Ceph = c.ceph(ctx) })
+	wg.Go(func() { st.Ceph = c.cephCached(ctx) })
 	wg.Wait()
 
 	byHost := map[string]*api.Node{}
@@ -221,6 +234,62 @@ type cephStatus struct {
 			Count     int    `json:"count"`
 		} `json:"pgs_by_state"`
 	} `json:"pgmap"`
+}
+
+// Run refreshes the Ceph cache every CephRefresh until ctx ends.
+func (c *Collector) Run(ctx context.Context) {
+	t := time.NewTicker(CephRefresh)
+	defer t.Stop()
+	for {
+		c.refreshCeph(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// cephCached answers from the cache. Before the first refresh, or when the
+// cache is stale, it waits for a refresh instead.
+func (c *Collector) cephCached(ctx context.Context) api.CephStatus {
+	c.cephMu.Lock()
+	v := c.cephVal
+	c.cephMu.Unlock()
+	if !v.AsOf.IsZero() && c.now().Sub(v.AsOf) < cephStale {
+		return v
+	}
+	return c.refreshCeph(ctx)
+}
+
+// refreshCeph asks Ceph once. Callers that arrive while a refresh is running
+// wait for that one instead of starting their own.
+func (c *Collector) refreshCeph(ctx context.Context) api.CephStatus {
+	c.cephMu.Lock()
+	if ch := c.cephInflight; ch != nil {
+		c.cephMu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		}
+		c.cephMu.Lock()
+		defer c.cephMu.Unlock()
+		return c.cephVal
+	}
+	ch := make(chan struct{})
+	c.cephInflight = ch
+	c.cephMu.Unlock()
+
+	// Detached from the caller: a cancelled request must not leave the cache empty.
+	v := c.ceph(context.Background())
+	v.AsOf = c.now().UTC()
+
+	c.cephMu.Lock()
+	c.cephVal = v
+	c.cephInflight = nil
+	c.cephMu.Unlock()
+	close(ch)
+	return v
 }
 
 func (c *Collector) ceph(ctx context.Context) api.CephStatus {

@@ -107,6 +107,7 @@ type K3sNode struct {
 	Roles       []string `json:"roles"`
 	Version     string   `json:"version"`
 	Zone        string   `json:"zone,omitempty"`
+	BootID      string   `json:"-"`
 }
 
 // CephStatus is the Ceph part of /v1/status.
@@ -119,6 +120,8 @@ type CephStatus struct {
 	PGsTotal       int      `json:"pgs_total"`
 	PGsActiveClean int      `json:"pgs_active_clean"`
 	Error          string   `json:"error,omitempty"`
+	// AsOf is when Ceph was asked; the API refreshes it every 10 s.
+	AsOf time.Time `json:"as_of"`
 }
 
 // VIPStatus says which host holds a floating address. Owners has more than
@@ -127,4 +130,33 @@ type VIPStatus struct {
 	Name    string   `json:"name"`
 	Address string   `json:"address"`
 	Owners  []string `json:"owners"`
+}
+
+// ActionEvent is one line of an action's progress stream
+// (application/x-ndjson). The last line has Status "done" or "error".
+type ActionEvent struct {
+	Time    time.Time `json:"time"`
+	Status  string    `json:"status"` // progress, done, error
+	Message string    `json:"message"`
+}
+
+// Action event statuses.
+const (
+	EventProgress = "progress"
+	EventDone     = "done"
+	EventError    = "error"
+)
+
+// RestartPlan is what a VM restart would do (POST …/restart?dry_run=1).
+type RestartPlan struct {
+	VM    string   `json:"vm"`
+	Host  string   `json:"host"`
+	Roles []string `json:"roles"`
+	// Evict lists the pods a drain moves away ("namespace/name").
+	Evict []string `json:"evict"`
+	// Skipped counts DaemonSet and static pods, which stay.
+	Skipped int      `json:"skipped"`
+	Steps   []string `json:"steps"`
+	// LockHolder is set when another action holds the lock right now.
+	LockHolder string `json:"lock_holder,omitempty"`
 }

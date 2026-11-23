@@ -63,10 +63,15 @@ func New(base, token string) (*Client, error) {
 
 // Do sends a GET and returns the raw response body; the caller closes it.
 func (c *Client) Do(ctx context.Context, path string, q url.Values) (io.ReadCloser, error) {
+	return c.Send(ctx, http.MethodGet, path, q)
+}
+
+// Send is Do with any method.
+func (c *Client) Send(ctx context.Context, method, path string, q url.Values) (io.ReadCloser, error) {
 	u := *c.base
 	u.Path = c.base.Path + path
 	u.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -107,6 +112,22 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values, out any) er
 func (c *Client) Whoami(ctx context.Context) (api.Whoami, error) {
 	var w api.Whoami
 	return w, c.Get(ctx, "/v1/whoami", nil, &w)
+}
+
+// RestartPlan asks what a VM restart would do (dry run).
+func (c *Client) RestartPlan(ctx context.Context, vm string) (api.RestartPlan, error) {
+	var p api.RestartPlan
+	body, err := c.Send(ctx, http.MethodPost, "/v1/actions/vms/"+url.PathEscape(vm)+"/restart", url.Values{"dry_run": {"1"}})
+	if err != nil {
+		return p, err
+	}
+	defer body.Close()
+	return p, json.NewDecoder(body).Decode(&p)
+}
+
+// RestartVM starts the restart and returns its progress stream (JSON lines).
+func (c *Client) RestartVM(ctx context.Context, vm string) (io.ReadCloser, error) {
+	return c.Send(ctx, http.MethodPost, "/v1/actions/vms/"+url.PathEscape(vm)+"/restart", nil)
 }
 
 func (c *Client) Status(ctx context.Context) (api.Status, error) {

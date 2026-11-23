@@ -3,6 +3,7 @@
 package kube
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -104,51 +105,96 @@ func FromKubeconfig(path string) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.server+path, nil)
+// StatusError is a non-2xx answer from the Kubernetes API.
+type StatusError struct {
+	Code    int
+	Path    string
+	Message string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("kubernetes %s: %d %s: %s", e.Path, e.Code, http.StatusText(e.Code), e.Message)
+}
+
+// IsStatus reports whether err is a Kubernetes answer with this HTTP code.
+func IsStatus(err error, code int) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == code
+}
+
+func (c *Client) do(ctx context.Context, method, path, contentType string, body, out any) error {
+	if c == nil {
+		return errors.New("no kubeconfig configured")
+	}
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.server+path, rd)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", contentType)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("kubernetes %s: %s: %s", path, resp.Status, strings.TrimSpace(string(b)))
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		msg := strings.TrimSpace(string(b))
+		var st struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(b, &st) == nil && st.Message != "" {
+			msg = st.Message
+		}
+		return &StatusError{Code: resp.StatusCode, Path: path, Message: msg}
+	}
+	if out == nil {
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (c *Client) get(ctx context.Context, path string, out any) error {
+	return c.do(ctx, http.MethodGet, path, "", nil, out)
+}
+
+type nodeItem struct {
+	Metadata struct {
+		Name   string            `json:"name"`
+		Labels map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		Unschedulable bool `json:"unschedulable"`
+	} `json:"spec"`
+	Status struct {
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"conditions"`
+		NodeInfo struct {
+			KubeletVersion string `json:"kubeletVersion"`
+			BootID         string `json:"bootID"`
+		} `json:"nodeInfo"`
+	} `json:"status"`
+}
+
 type nodeList struct {
-	Items []struct {
-		Metadata struct {
-			Name   string            `json:"name"`
-			Labels map[string]string `json:"labels"`
-		} `json:"metadata"`
-		Spec struct {
-			Unschedulable bool `json:"unschedulable"`
-		} `json:"spec"`
-		Status struct {
-			Conditions []struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-			} `json:"conditions"`
-			NodeInfo struct {
-				KubeletVersion string `json:"kubeletVersion"`
-			} `json:"nodeInfo"`
-		} `json:"status"`
-	} `json:"items"`
+	Items []nodeItem `json:"items"`
 }
 
 // Nodes lists the cluster's nodes.
 func (c *Client) Nodes(ctx context.Context) ([]api.K3sNode, error) {
-	if c == nil {
-		return nil, errors.New("no kubeconfig configured")
-	}
 	var list nodeList
 	if err := c.get(ctx, "/api/v1/nodes", &list); err != nil {
 		return nil, err
@@ -164,6 +210,7 @@ func convertNodes(list nodeList) []api.K3sNode {
 			Schedulable: !n.Spec.Unschedulable,
 			Version:     n.Status.NodeInfo.KubeletVersion,
 			Zone:        n.Metadata.Labels["topology.kubernetes.io/zone"],
+			BootID:      n.Status.NodeInfo.BootID,
 			Roles:       []string{},
 		}
 		for k := range n.Metadata.Labels {

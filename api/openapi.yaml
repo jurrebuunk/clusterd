@@ -1,12 +1,14 @@
 openapi: 3.1.0
 info:
   title: clusterd
-  version: 0.1.0
+  version: 1.0.0
   summary: Platform API of the homelab
   description: |
     One stateless instance per hypervisor behind a highly available address.
     Every endpoint except /v1/health needs `Authorization: Bearer <token>`.
     Scopes nest: manage ⊃ operator ⊃ read. Errors are `{"error": "..."}`.
+    Stable from 1.0.0: /v1 only changes in backward-compatible ways (new
+    endpoints, new optional fields); anything breaking goes to /v2.
     Handbook: https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/
 servers:
   - url: https://api.lan.buunk.org
@@ -135,16 +137,48 @@ paths:
       x-scope: read
       responses: *proxied
 
-  /v1/actions/{path}:
-    description: Reserved for actions (v1.0); needs at least operator scope.
-    get:
+  /v1/actions/vms/{name}/restart:
+    post:
+      summary: Restart a VM safely (cordon, drain, restart, wait Ready, uncordon)
+      description: |
+        Runs on the VM's own host; another instance forwards the request there
+        with the caller's token. Preconditions: the VM is enabled in the
+        inventory, every other node is Ready, etcd keeps quorum, and no pod
+        without a controller would be lost. One disruptive action runs at a
+        time across the cluster (a Kubernetes Lease). Progress streams as JSON
+        lines; the action finishes even if the client disconnects. With
+        dry_run=1 nothing changes and the plan comes back.
       x-scope: operator
       parameters:
-        - { name: path, in: path, required: true, schema: { type: string } }
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: dry_run, in: query, schema: { type: boolean } }
       responses:
+        "200":
+          description: The plan (dry run) or the progress stream
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RestartPlan" }
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ActionEvent" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Another action holds the lock
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "412":
+          description: Not safe right now (the message says why)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503":
+          description: This instance has no Kubernetes access
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
 components:
   securitySchemes:
@@ -177,7 +211,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     BadGateway:
-      description: No monitoring store answered
+      description: No monitoring store, or the VM's host, answered
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -279,6 +313,7 @@ components:
             pgs_total: { type: integer }
             pgs_active_clean: { type: integer }
             error: { type: string }
+            as_of: { type: string, format: date-time, description: "When Ceph was asked; refreshed every 10 s" }
         vips:
           type: array
           items:
@@ -287,3 +322,20 @@ components:
               name: { type: string }
               address: { type: string }
               owners: { type: array, items: { type: string }, description: "More than one: split brain" }
+    RestartPlan:
+      type: object
+      properties:
+        vm: { type: string }
+        host: { type: string }
+        roles: { type: array, items: { type: string } }
+        evict: { type: array, items: { type: string }, description: "Pods the drain moves, namespace/name" }
+        skipped: { type: integer, description: DaemonSet and static pods, which stay }
+        steps: { type: array, items: { type: string } }
+        lock_holder: { type: string, description: Set when another action runs right now }
+    ActionEvent:
+      type: object
+      required: [time, status, message]
+      properties:
+        time: { type: string, format: date-time }
+        status: { type: string, enum: [progress, done, error] }
+        message: { type: string }

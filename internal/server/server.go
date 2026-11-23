@@ -16,6 +16,7 @@ import (
 
 	"github.com/VictoriaMetrics/metrics"
 
+	"github.com/jurrebuunk/clusterd/internal/actions"
 	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/auth"
 	"github.com/jurrebuunk/clusterd/internal/config"
@@ -31,11 +32,13 @@ type Server struct {
 	status  *status.Collector
 	metrics *proxy.Proxy
 	logs    *proxy.Proxy
+	actions *actions.Engine // nil without Kubernetes access
+	peers   *http.Client    // forwarding actions to the VM's host
 	log     *slog.Logger
 }
 
-// New wires the API. The proxies are built from cfg.
-func New(cfg *config.Config, tokens *auth.Store, st *status.Collector, log *slog.Logger) (*Server, error) {
+// New wires the API. The proxies are built from cfg; eng may be nil.
+func New(cfg *config.Config, tokens *auth.Store, st *status.Collector, eng *actions.Engine, log *slog.Logger) (*Server, error) {
 	opts := proxy.Options{
 		Timeout:   cfg.Limits.RequestTimeout.Duration,
 		FollowMax: cfg.Limits.FollowMax.Duration,
@@ -54,7 +57,7 @@ func New(cfg *config.Config, tokens *auth.Store, st *status.Collector, log *slog
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, tokens: tokens, status: st, metrics: mp, logs: lp, log: log}, nil
+	return &Server{cfg: cfg, tokens: tokens, status: st, metrics: mp, logs: lp, actions: eng, peers: peerClient(cfg), log: log}, nil
 }
 
 type route struct {
@@ -65,10 +68,35 @@ type route struct {
 	h       http.HandlerFunc
 }
 
+// Route describes one endpoint, for the contract test against api/openapi.yaml.
+type Route struct {
+	Method, Path, Scope string
+}
+
+// Routes lists the documented endpoints (not the catch-alls).
+func (s *Server) Routes() []Route {
+	var out []Route
+	for _, rt := range s.routes() {
+		method, path, ok := strings.Cut(rt.pattern, " ")
+		if !ok {
+			continue
+		}
+		out = append(out, Route{Method: method, Path: path, Scope: rt.scope.String()})
+	}
+	return out
+}
+
 // Handler is the full API with middleware.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	routes := []route{
+	for _, rt := range s.routes() {
+		mux.Handle(rt.pattern, s.wrap(rt))
+	}
+	return securityHeaders(mux)
+}
+
+func (s *Server) routes() []route {
+	return []route{
 		{"GET /v1/health", "health", auth.ScopeNone, false, s.health},
 		{"GET /v1/whoami", "whoami", auth.ScopeRead, false, s.whoami},
 		{"GET /v1/node", "node", auth.ScopeRead, false, s.node},
@@ -84,7 +112,8 @@ func (s *Server) Handler() http.Handler {
 		{"GET /v1/logs/hits", "logs_hits", auth.ScopeRead, false, s.logsRoute("/select/logsql/hits")},
 		{"GET /v1/logs/streams", "logs_streams", auth.ScopeRead, false, s.logsRoute("/select/logsql/streams")},
 
-		// Actions arrive in v1.0; the prefix already demands operator scope.
+		{"POST /v1/actions/vms/{name}/restart", "vm_restart", auth.ScopeOperator, true, s.vmRestart},
+		// Anything else under actions still needs operator scope to learn it doesn't exist.
 		{"/v1/actions/", "actions", auth.ScopeOperator, false, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "no such action")
 		}},
@@ -92,10 +121,6 @@ func (s *Server) Handler() http.Handler {
 			writeError(w, http.StatusNotFound, "not found")
 		}},
 	}
-	for _, rt := range routes {
-		mux.Handle(rt.pattern, s.wrap(rt))
-	}
-	return securityHeaders(mux)
 }
 
 type ctxKey int

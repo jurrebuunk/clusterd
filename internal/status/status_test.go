@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/config"
@@ -113,5 +115,45 @@ func TestStatus(t *testing.T) {
 	}
 	if st.K3s.Reachable || st.K3s.Error == "" {
 		t.Fatalf("k3s without kubeconfig = %+v", st.K3s)
+	}
+}
+
+func TestCephCacheCoalesces(t *testing.T) {
+	cfg := &config.Config{Site: "lab", Host: "hv01", Hosts: []config.Host{{Name: "hv01", API: "http://x", Metrics: "http://x", Logs: "http://x"}}}
+	cfg.Ceph.Command, cfg.Ceph.ID, cfg.Ceph.Keyring = "ceph", "clusterd", "/k"
+	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var mu sync.Mutex
+	calls := 0
+	c.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // the real CLI takes ~0.5 s
+		return []byte(cephJSON), nil
+	}
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Go(func() {
+			if got := c.cephCached(context.Background()); got.Health != "HEALTH_WARN" || got.AsOf.IsZero() {
+				t.Errorf("cached = %+v", got)
+			}
+		})
+	}
+	wg.Wait()
+	if calls != 1 {
+		t.Fatalf("10 concurrent callers ran ceph %d times, want 1", calls)
+	}
+	start := time.Now()
+	c.cephCached(context.Background())
+	if calls != 1 || time.Since(start) > 10*time.Millisecond {
+		t.Fatalf("a fresh cache was not used (calls %d)", calls)
+	}
+	// Stale: older than a minute, it is refreshed before answering.
+	c.cephMu.Lock()
+	c.cephVal.AsOf = time.Now().Add(-2 * time.Minute)
+	c.cephMu.Unlock()
+	c.cephCached(context.Background())
+	if calls != 2 {
+		t.Fatalf("stale cache not refreshed (calls %d)", calls)
 	}
 }

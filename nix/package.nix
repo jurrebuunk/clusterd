@@ -1,5 +1,5 @@
 # Builds one of the two programs; both share the source and Go modules.
-{ lib, buildGoModule, self }:
+{ lib, stdenv, buildGoModule, installShellFiles, self }:
 name:
 let
   version = lib.fileContents ../VERSION;
@@ -14,6 +14,7 @@ buildGoModule {
       ../go.sum
       ../cmd
       ../internal
+      ../api # the contract test checks the server against it
     ];
   };
   vendorHash = "sha256-F6WucqRB14LsXuPOPYlbRfS0Voex3YJVoaWw3X3Mgbk=";
@@ -26,6 +27,13 @@ buildGoModule {
     "-X github.com/jurrebuunk/clusterd/internal/version.Commit=${self.shortRev or self.dirtyShortRev or "unknown"}"
     "-X github.com/jurrebuunk/clusterd/internal/version.Date=${self.lastModifiedDate or "unknown"}"
   ];
+  nativeBuildInputs = lib.optional (name == "labctl") installShellFiles;
+  postInstall = lib.optionalString (name == "labctl" && stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+    installShellCompletion --cmd labctl \
+      --bash <($out/bin/labctl completion bash) \
+      --zsh <($out/bin/labctl completion zsh) \
+      --fish <($out/bin/labctl completion fish)
+  '';
   meta = {
     description =
       if name == "clusterd" then "Platform API for the homelab" else "Command-line client for the clusterd API";

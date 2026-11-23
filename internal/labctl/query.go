@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,9 +16,18 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/api"
 )
 
+var statusSections = []string{"hosts", "vms", "nodes", "ceph", "vips"}
+
 func cmdStatus(e *env, args []string) error {
-	if len(args) > 0 {
-		return usageErr("status takes no arguments")
+	if len(args) > 1 {
+		return usageErr("usage: labctl status [%s]", strings.Join(statusSections, "|"))
+	}
+	section := ""
+	if len(args) == 1 {
+		section = strings.TrimSuffix(args[0], "s") + "s"
+		if !slices.Contains(statusSections, section) {
+			return usageErr("unknown section %q (want %s)", args[0], strings.Join(statusSections, ", "))
+		}
 	}
 	c, err := e.client()
 	if err != nil {
@@ -30,95 +40,125 @@ func cmdStatus(e *env, args []string) error {
 	if e.json {
 		return e.printJSON(st)
 	}
-	printStatus(e.stdout, st)
+	printStatus(e.stdout, e.stderr, st, section, time.Now())
 	return nil
 }
 
-func printStatus(w io.Writer, st api.Status) {
-	fmt.Fprintf(w, "Site %s · served by %s · %s\n", st.Site, st.ServedBy, st.GeneratedAt.Local().Format("2006-01-02 15:04:05"))
+// printStatus prints kubectl-style tables: one per section, a blank line
+// between them, problems as warnings on stderr.
+func printStatus(w, warn io.Writer, st api.Status, only string, now time.Time) {
+	first := true
+	section := func(name string) *tabwriter.Writer {
+		if only != "" && only != name {
+			return nil
+		}
+		if !first {
+			fmt.Fprintln(w)
+		}
+		first = false
+		return tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	}
 
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "\nHOST\tSTATE\tCLUSTERD\tUPTIME\tLOAD\tMEM\tSTORES")
 	unreachable := 0
-	for _, h := range st.Hosts {
-		if !h.Reachable {
-			unreachable++
-			fmt.Fprintf(tw, "%s\tunreachable\t-\t-\t-\t-\t(%s)\n", h.Name, shortError(h.Error))
-			continue
-		}
-		stores := "ok"
-		for _, s := range h.Stores {
-			if !s.OK {
-				stores = s.Name + " down"
+	if tw := section("hosts"); tw != nil {
+		fmt.Fprintln(tw, "HOST\tSTATUS\tCLUSTERD\tUPTIME\tLOAD\tMEM")
+		for _, h := range st.Hosts {
+			if !h.Reachable {
+				unreachable++
+				fmt.Fprintf(tw, "%s\tUnreachable\t-\t-\t-\t-\n", h.Name)
+				fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, shortError(h.Error))
+				continue
 			}
+			status := "Up"
+			for _, s := range h.Stores {
+				if !s.OK {
+					status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
+				}
+			}
+			if h.Error != "" {
+				fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, h.Error)
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.0f%%\n", h.Name, status, h.Version, age(time.Duration(h.UptimeSeconds)*time.Second), h.Load1, h.MemUsedPercent)
 		}
-		state := "up"
-		if h.Error != "" {
-			state = "degraded"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.0f%%\t%s\n", h.Name, state, h.Version, uptime(h.UptimeSeconds), h.Load1, h.MemUsedPercent, stores)
-	}
-	tw.Flush()
-
-	fmt.Fprintln(tw, "\nVM\tHOST\tSTATE")
-	for _, vm := range st.VMs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", vm.Name, vm.Host, vm.State)
-	}
-	tw.Flush()
-
-	if !st.K3s.Reachable {
-		fmt.Fprintf(w, "\nk3s: unreachable (%s)\n", st.K3s.Error)
+		tw.Flush()
 	} else {
-		ready := 0
-		for _, n := range st.K3s.Nodes {
-			if n.Ready {
-				ready++
+		for _, h := range st.Hosts {
+			if !h.Reachable {
+				unreachable++
 			}
 		}
-		fmt.Fprintf(w, "\nk3s: %d/%d nodes ready\n", ready, len(st.K3s.Nodes))
-		fmt.Fprintln(tw, "NODE\tREADY\tSCHEDULING\tROLES\tVERSION\tZONE")
-		for _, n := range st.K3s.Nodes {
-			sched := "enabled"
-			if !n.Schedulable {
-				sched = "cordoned"
-			}
-			roles := strings.Join(n.Roles, ",")
-			if roles == "" {
-				roles = "worker"
-			}
-			fmt.Fprintf(tw, "%s\t%v\t%s\t%s\t%s\t%s\n", n.Name, n.Ready, sched, roles, n.Version, n.Zone)
+	}
+
+	if tw := section("vms"); tw != nil {
+		fmt.Fprintln(tw, "VM\tHOST\tSTATUS")
+		for _, vm := range st.VMs {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", vm.Name, vm.Host, title(vm.State))
 		}
 		tw.Flush()
 	}
 
-	cp := st.Ceph
-	if cp.Error != "" {
-		fmt.Fprintf(w, "\nceph: %s (%s)\n", cp.Health, cp.Error)
-	} else {
-		fmt.Fprintf(w, "\nceph: %s · OSDs %d up, %d in, of %d · PGs %d/%d active+clean\n",
-			cp.Health, cp.OSDsUp, cp.OSDsIn, cp.OSDsTotal, cp.PGsActiveClean, cp.PGsTotal)
-		for _, chk := range cp.Checks {
-			fmt.Fprintf(w, "  %s\n", chk)
+	if tw := section("nodes"); tw != nil {
+		if !st.K3s.Reachable {
+			fmt.Fprintf(warn, "warning: k3s API unreachable: %s\n", shortError(st.K3s.Error))
 		}
+		fmt.Fprintln(tw, "NODE\tSTATUS\tROLES\tVERSION\tZONE")
+		for _, n := range st.K3s.Nodes {
+			status := "Ready"
+			if !n.Ready {
+				status = "NotReady"
+			}
+			if !n.Schedulable {
+				status += ",SchedulingDisabled"
+			}
+			roles := strings.Join(n.Roles, ",")
+			if roles == "" {
+				roles = "<none>"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, status, roles, n.Version, n.Zone)
+		}
+		tw.Flush()
 	}
 
-	fmt.Fprintln(tw, "\nVIP\tADDRESS\tOWNER")
-	for _, v := range st.VIPs {
-		owner := strings.Join(v.Owners, ", ")
-		switch len(v.Owners) {
-		case 0:
-			owner = "none"
-			if unreachable > 0 {
-				// It may be on a host we can't ask.
-				owner = "unknown"
-			}
-		case 1:
-		default:
-			owner += " (split brain!)"
+	if tw := section("ceph"); tw != nil {
+		cp := st.Ceph
+		if cp.Error != "" {
+			fmt.Fprintf(warn, "warning: ceph: %s\n", cp.Error)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", v.Name, v.Address, owner)
+		for _, chk := range cp.Checks {
+			fmt.Fprintf(warn, "warning: ceph %s\n", chk)
+		}
+		ago := "-"
+		if !cp.AsOf.IsZero() {
+			ago = age(now.Sub(cp.AsOf))
+		}
+		fmt.Fprintln(tw, "CEPH\tOSDS UP\tOSDS IN\tPGS CLEAN\tAGE")
+		fmt.Fprintf(tw, "%s\t%d/%d\t%d/%d\t%d/%d\t%s\n", cp.Health, cp.OSDsUp, cp.OSDsTotal, cp.OSDsIn, cp.OSDsTotal, cp.PGsActiveClean, cp.PGsTotal, ago)
+		tw.Flush()
 	}
-	tw.Flush()
+
+	if tw := section("vips"); tw != nil {
+		fmt.Fprintln(tw, "VIP\tADDRESS\tOWNER")
+		for _, v := range st.VIPs {
+			owner := strings.Join(v.Owners, ",")
+			switch {
+			case len(v.Owners) > 1:
+				fmt.Fprintf(warn, "warning: VIP %s is on %d hosts (split brain)\n", v.Name, len(v.Owners))
+			case len(v.Owners) == 0 && unreachable > 0:
+				owner = "<unknown>" // it may be on a host we can't ask
+			case len(v.Owners) == 0:
+				owner = "<none>"
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", v.Name, v.Address, owner)
+		}
+		tw.Flush()
+	}
+}
+
+func title(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // shortError keeps the last, most specific part of a Go error chain, e.g.
@@ -133,12 +173,30 @@ func shortError(s string) string {
 	return s
 }
 
-func uptime(s int64) string {
-	d := time.Duration(s) * time.Second
-	if days := int(d.Hours()) / 24; days > 0 {
-		return fmt.Sprintf("%dd%dh", days, int(d.Hours())%24)
+// age formats a duration like kubectl's AGE column: 45s, 12m, 5h3m, 3d4h, 40d.
+func age(d time.Duration) string {
+	if d < 0 {
+		d = 0
 	}
-	return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 8*time.Hour:
+		if m := int(d.Minutes()) % 60; m > 0 {
+			return fmt.Sprintf("%dh%dm", int(d.Hours()), m)
+		}
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 8*24*time.Hour:
+		if h := int(d.Hours()) % 24; h > 0 {
+			return fmt.Sprintf("%dd%dh", int(d.Hours())/24, h)
+		}
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	}
+	return fmt.Sprintf("%dd", int(d.Hours())/24)
 }
 
 // parseSince accepts Go durations plus d (days) and w (weeks).
@@ -258,17 +316,16 @@ func printProm(w io.Writer, resp promResponse) error {
 		}
 		return tw.Flush()
 	}
-	for i, s := range samples {
-		if i > 0 {
-			fmt.Fprintln(w)
-		}
-		fmt.Fprintln(w, labelString(s.Metric))
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "SERIES\tTIME\tVALUE")
+	for _, s := range samples {
+		name := labelString(s.Metric)
 		for _, p := range s.Values {
 			ts, _ := p[0].(float64)
-			fmt.Fprintf(w, "  %s  %v\n", time.Unix(int64(ts), 0).Local().Format("2006-01-02 15:04:05"), p[1])
+			fmt.Fprintf(tw, "%s\t%s\t%v\n", name, time.Unix(int64(ts), 0).Local().Format("15:04:05"), p[1])
 		}
 	}
-	return nil
+	return tw.Flush()
 }
 
 func labelString(m map[string]string) string {
@@ -282,6 +339,9 @@ func labelString(m map[string]string) string {
 	if len(parts) == 0 && name != "" {
 		return name
 	}
+	if len(parts) == 0 {
+		return "{}"
+	}
 	return name + "{" + strings.Join(parts, ", ") + "}"
 }
 
@@ -294,8 +354,14 @@ func buildLogsQuery(host, unit string, since time.Duration, limit int, follow bo
 	if host != "" {
 		filters = append(filters, "host:="+strconv.Quote(host))
 	}
-	if unit != "" {
+	switch {
+	case unit == "":
+	case strings.Contains(unit, "."):
 		filters = append(filters, "unit:="+strconv.Quote(unit))
+	default:
+		// Like journalctl -u: "clusterd" means clusterd.service, but syslog
+		// apps (the router's "filterlog") have no suffix.
+		filters = append(filters, fmt.Sprintf("unit:in(%s, %s)", strconv.Quote(unit), strconv.Quote(unit+".service")))
 	}
 	user = strings.TrimSpace(user)
 	hasPipe := strings.Contains(user, "|")
@@ -423,5 +489,5 @@ func (e *env) printLogLine(line []byte) {
 	}
 	host, _ := rec["host"].(string)
 	unit, _ := rec["unit"].(string)
-	fmt.Fprintf(e.stdout, "%s %s %s: %s\n", ts, host, unit, msg)
+	fmt.Fprintf(e.stdout, "%s %s %s %s\n", ts, host, strings.TrimSuffix(unit, ".service"), msg)
 }

@@ -44,7 +44,7 @@ func setup(t *testing.T) (http.Handler, map[auth.Scope]string, *[]upstreamHit) {
 	cfg.Limits.ProxyMaxBytes = 1 << 20
 	cfg.Limits.LogsLimit = 1000
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s, err := New(cfg, auth.NewStore(parsed), status.New(cfg, nil, log), log)
+	s, err := New(cfg, auth.NewStore(parsed), status.New(cfg, nil, log), nil, log)
 	if err != nil {
 		t.Fatal(err)
 	}

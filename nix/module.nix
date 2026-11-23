@@ -80,6 +80,17 @@ in
       package = lib.mkPackageOption pkgs "ceph" { };
     };
 
+    manageUnitPrefixes = lib.mkOption {
+      type = lib.types.listOf (lib.types.strMatching "[A-Za-z0-9@_.-]+");
+      default = [ ];
+      example = [ "microvm@" ];
+      description = ''
+        Units clusterd may restart, start and stop (through polkit), by name
+        prefix: "microvm@" allows microvm@<anything>.service and nothing else.
+        Empty: clusterd can't manage any unit.
+      '';
+    };
+
     extraGroups = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -88,6 +99,29 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    security.polkit = lib.mkIf (cfg.manageUnitPrefixes != [ ]) {
+      enable = lib.mkDefault true;
+      # Only these verbs, only these units, only this user.
+      extraConfig = ''
+        polkit.addRule(function(action, subject) {
+          if (action.id != "org.freedesktop.systemd1.manage-units" || subject.user != "clusterd") {
+            return polkit.Result.NOT_HANDLED;
+          }
+          var unit = action.lookup("unit") || "";
+          var verb = action.lookup("verb") || "";
+          var prefixes = ${builtins.toJSON cfg.manageUnitPrefixes};
+          var allowed = ["restart", "start", "stop"];
+          for (var i = 0; i < prefixes.length; i++) {
+            if (unit.indexOf(prefixes[i]) === 0 && /^[A-Za-z0-9@_.:-]+\.service$/.test(unit) &&
+                allowed.indexOf(verb) >= 0) {
+              return polkit.Result.YES;
+            }
+          }
+          return polkit.Result.NOT_HANDLED;
+        });
+      '';
+    };
+
     # A fixed user: polkit rules (v1.0 actions) need a stable name.
     users.users.clusterd = {
       isSystemUser = true;

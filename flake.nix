@@ -46,6 +46,7 @@
                 services.clusterd = {
                   enable = true;
                   tokensFile = "/run/secrets/api-tokens";
+                  manageUnitPrefixes = [ "microvm@" ];
                   settings = {
                     site = "test";
                     host = "test";
@@ -65,6 +66,31 @@
         {
           inherit (self.packages.${system}) clusterd labctl;
           module = eval.config.systemd.units."clusterd.service".unit;
+          # The polkit rule is valid JavaScript and only allows what it should.
+          polkit = pkgs.runCommand "clusterd-polkit-check" { nativeBuildInputs = [ pkgs.nodejs ]; } ''
+            cat > rule.js <<'EOF'
+            var polkit = { Result: { YES: "yes", NOT_HANDLED: "no" }, rules: [], addRule: function (f) { this.rules.push(f); } };
+            ${eval.config.security.polkit.extraConfig}
+            function ask(user, unit, verb) {
+              var action = { id: "org.freedesktop.systemd1.manage-units", lookup: function (k) { return k == "unit" ? unit : verb; } };
+              return polkit.rules[0](action, { user: user });
+            }
+            var cases = [
+              ["clusterd", "microvm@hgd1-k8w01.service", "restart", "yes"],
+              ["clusterd", "microvm@hgd1-k8w01.service", "stop", "yes"],
+              ["clusterd", "microvm@x.service", "enable", "no"],
+              ["clusterd", "sshd.service", "restart", "no"],
+              ["clusterd", "microvm@x.socket", "restart", "no"],
+              ["jurre", "microvm@hgd1-k8w01.service", "restart", "no"],
+            ];
+            cases.forEach(function (c) {
+              var got = ask(c[0], c[1], c[2]);
+              if (got !== c[3]) { console.error("polkit", c, "got", got); process.exit(1); }
+            });
+            EOF
+            node rule.js
+            touch $out
+          '';
           config = pkgs.runCommand "clusterd-config-check" { } ''
             touch tokens
             sed 's#/run/credentials/clusterd.service/tokens#'"$PWD"'/tokens#' \

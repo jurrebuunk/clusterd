@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/jurrebuunk/clusterd/internal/client"
 )
@@ -62,23 +63,26 @@ func commands() []command {
 		{"login", "[--api URL] [--token-file F]", "Store and check a token for the site", cmdLogin},
 		{"use", "[site]", "Switch the current site, or list sites", cmdUse},
 		{"whoami", "", "Show the site, token name and scope", cmdWhoami},
-		{"status", "", "Hosts, VMs, k3s nodes, Ceph and VIP owners", cmdStatus},
+		{"status", "[hosts|vms|nodes|ceph|vips]", "Hosts, VMs, k3s nodes, Ceph and VIP owners", cmdStatus},
 		{"metrics", "query|range <promql> [flags]", "Query metrics (PromQL / MetricsQL)", cmdMetrics},
 		{"logs", "[--host H] [--unit U] [--since D] [--limit N] [--follow] [query]", "Search or follow logs (LogsQL)", cmdLogs},
+		{"vm", "restart <vm> [--yes] [--dry-run]", "Restart a VM safely: cordon, drain, restart, wait Ready, uncordon", cmdVM},
 		{"token", "new --name N --scope read|operator|manage [--out F]", "Generate a token and its hash line (local)", cmdToken},
 		{"version", "", "Show labctl and server versions", cmdVersion},
+		{"completion", "bash|zsh|fish", "Print a shell completion script", cmdCompletion},
 	}
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "labctl: command-line client for the clusterd platform API")
-	fmt.Fprintln(w, "\nUsage: labctl [--site S] [--json] <command> [args]")
-	fmt.Fprintln(w, "\nCommands:")
+	fmt.Fprintln(w, "labctl controls the platform through the clusterd API.")
+	fmt.Fprintln(w, "\nUsage:\n  labctl [--site S] [--json] <command> [args]\n\nCommands:")
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	for _, c := range commands() {
-		fmt.Fprintf(w, "  %-8s %s\n           %s\n", c.name, c.help, c.args)
+		fmt.Fprintf(tw, "  %s %s\t%s\n", c.name, c.args, c.help)
 	}
-	fmt.Fprintln(w, "\nEnvironment: LABCTL_API, LABCTL_TOKEN, LABCTL_SITE override the config.")
-	fmt.Fprintln(w, "Exit codes: 0 ok, 1 API error, 2 usage, 3 API unreachable, 4 token missing/invalid/not allowed.")
+	tw.Flush()
+	fmt.Fprintln(w, "\nEnvironment: LABCTL_API, LABCTL_TOKEN, LABCTL_SITE.")
+	fmt.Fprintln(w, "Exit codes: 0 ok, 1 API error, 2 usage, 3 unreachable, 4 token missing or not allowed.")
 }
 
 // Main runs labctl and returns the exit code.
@@ -100,7 +104,7 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			e.json = true
 		case a == "--site":
 			if i+1 >= len(args) {
-				fmt.Fprintln(stderr, "labctl: --site needs a value")
+				fmt.Fprintln(stderr, "error: --site needs a value")
 				return ExitUsage
 			}
 			siteFlag = args[i+1]
@@ -122,9 +126,12 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		rest[0] = "version"
 	}
 
+	if rest[0] == "completion" {
+		return exitCode(stderr, cmdCompletion(e, rest[1:]))
+	}
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintln(stderr, "labctl:", err)
+		fmt.Fprintln(stderr, "error:", err)
 		return ExitUsage
 	}
 	e.cfg = cfg
@@ -136,12 +143,16 @@ func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		e.site = siteFlag
 	}
 
+	if rest[0] == "__complete" {
+		cmdComplete(e, rest[1:]) // for the completion scripts; never fails loudly
+		return ExitOK
+	}
 	for _, c := range commands() {
 		if c.name == rest[0] {
 			return exitCode(stderr, c.run(e, rest[1:]))
 		}
 	}
-	fmt.Fprintf(stderr, "labctl: unknown command %q (see labctl help)\n", rest[0])
+	fmt.Fprintf(stderr, "error: unknown command %q (see labctl help)\n", rest[0])
 	return ExitUsage
 }
 
@@ -155,7 +166,7 @@ func exitCode(stderr io.Writer, err error) int {
 	if errors.Is(err, context.Canceled) {
 		return ExitOK // Ctrl-C while following
 	}
-	fmt.Fprintln(stderr, "labctl:", err)
+	fmt.Fprintln(stderr, "error:", err)
 	var ee *exitError
 	var ae *client.APIError
 	var ue *client.UnreachableError

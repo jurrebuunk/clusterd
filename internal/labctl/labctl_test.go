@@ -2,6 +2,7 @@ package labctl
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jurrebuunk/clusterd/internal/actions"
+	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/auth"
 	"github.com/jurrebuunk/clusterd/internal/config"
+	"github.com/jurrebuunk/clusterd/internal/kubefake"
 	"github.com/jurrebuunk/clusterd/internal/server"
 	"github.com/jurrebuunk/clusterd/internal/status"
 )
@@ -39,7 +43,20 @@ func apiServer(t *testing.T) (string, string) {
 	cfg.Limits.ProxyMaxBytes = 1 << 20
 	cfg.Limits.LogsLimit = 10
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s, err := server.New(cfg, auth.NewStore(tokens), status.New(cfg, nil, log), log)
+	for _, vm := range []string{"m1", "m2", "m3", "w1"} {
+		cfg.VMs = append(cfg.VMs, config.VM{Name: vm, Host: "hv01", Enabled: true})
+	}
+	fake := kubefake.New()
+	eng := &actions.Engine{Cfg: cfg, Kube: fake, Log: log,
+		Timing: actions.Timing{Poll: 2 * time.Millisecond, DrainTimeout: time.Second, RestartTimeout: time.Second,
+			BootTimeout: time.Second, LockTTL: 5 * time.Second, Total: 5 * time.Second},
+		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			fake.Mu.Lock()
+			fake.NodeMap["w1"].BootID = "boot-2"
+			fake.Mu.Unlock()
+			return nil, nil
+		}}
+	s, err := server.New(cfg, auth.NewStore(tokens), status.New(cfg, nil, log), eng, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +86,7 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("login with a bad token: exit %d", code)
 	}
 	code, out, errs := run(t, tok+"\n", "login", "--site", "lab", "--api", url)
-	if code != 0 || !strings.Contains(out, "as tester, scope manage") {
+	if code != 0 || !strings.Contains(out, "as tester (manage)") {
 		t.Fatalf("login: %d %q %q", code, out, errs)
 	}
 	tokPath := filepath.Join(cfgHome, "labctl", "tokens", "lab")
@@ -86,7 +103,7 @@ func TestEndToEnd(t *testing.T) {
 	if code, out, _ := run(t, "", "--json", "status"); code != 0 || !strings.Contains(out, `"site": "lab"`) {
 		t.Fatalf("status --json: %d %q", code, out)
 	}
-	if code, out, _ := run(t, "", "status"); code != 0 || !strings.Contains(out, "Site lab") {
+	if code, out, _ := run(t, "", "status"); code != 0 || !strings.HasPrefix(out, "HOST") {
 		t.Fatalf("status: %d %q", code, out)
 	}
 	if code, out, _ := run(t, "", "metrics", "query", "up"); code != 0 || !strings.Contains(out, `up{instance="hv01"}`) {
@@ -95,6 +112,22 @@ func TestEndToEnd(t *testing.T) {
 	code, out, _ = run(t, "", "logs", "--since", "1d")
 	if code != 0 || strings.Index(out, "first") > strings.Index(out, "second") || strings.Index(out, "first") < 0 {
 		t.Fatalf("logs (oldest first): %d %q", code, out)
+	}
+
+	// VM restart: refuses without a terminal or --yes, dry run lists steps,
+	// --yes runs it and prints the progress.
+	if code, _, errs := run(t, "", "vm", "restart", "w1"); code != ExitUsage || !strings.Contains(errs, "--yes") {
+		t.Fatalf("vm restart without --yes: %d %q", code, errs)
+	}
+	if code, out, _ := run(t, "", "vm", "restart", "w1", "--dry-run"); code != 0 || !strings.Contains(out, "drain node/w1 (2 pods)") {
+		t.Fatalf("dry run: %d %q", code, out)
+	}
+	code, out, errs = run(t, "", "vm", "restart", "w1", "--yes")
+	if code != 0 || !strings.Contains(out, "node/w1 uncordoned") || !strings.HasSuffix(strings.TrimSpace(out), "vm restart w1 done") {
+		t.Fatalf("vm restart: %d %q %q", code, out, errs)
+	}
+	if code, _, errs := run(t, "", "vm", "restart", "nope", "--yes"); code != ExitAPI || !strings.Contains(errs, "no VM") {
+		t.Fatalf("unknown vm: %d %q", code, errs)
 	}
 
 	// Environment overrides.
@@ -150,6 +183,7 @@ func TestBuildLogsQuery(t *testing.T) {
 		{"", "", false, "", `_time:1h | sort by (_time desc) limit 100`},
 		{"hv01", "ceph-osd-0.service", false, "error", `_time:1h host:="hv01" unit:="ceph-osd-0.service" (error) | sort by (_time desc) limit 100`},
 		{"hv01", "", true, "", `host:="hv01"`},
+		{"", "clusterd", true, "", `unit:in("clusterd", "clusterd.service")`},
 		{"", "", true, "", `*`},
 		{"", "", false, "error | stats count()", `_time:1h error | stats count()`},
 	}
@@ -168,7 +202,10 @@ func TestBuildLogsQuery(t *testing.T) {
 	}
 }
 
-func TestShortError(t *testing.T) {
+func TestShortErrorAndTitle(t *testing.T) {
+	if title("running") != "Running" {
+		t.Error("title")
+	}
 	for in, want := range map[string]string{
 		`unreachable: Get "https://10.10.20.11/v1/node": dial tcp 10.10.20.11:443: connect: connection refused`:                      "connection refused",
 		`unreachable: Get "https://10.10.20.12/v1/node": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`: "context deadline exceeded",
@@ -176,6 +213,79 @@ func TestShortError(t *testing.T) {
 	} {
 		if got := shortError(in); got != want {
 			t.Errorf("shortError(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestStatusOutput(t *testing.T) {
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	st := api.Status{
+		Hosts: []api.HostStatus{
+			{Name: "hv01", Reachable: true, Version: "1.0.0", UptimeSeconds: 3 * 86400, Load1: 0.5, MemUsedPercent: 31.6,
+				Stores: []api.StoreHealth{{Name: "victoriametrics", OK: true}, {Name: "victorialogs", OK: false}}},
+			{Name: "hv02", Error: `unreachable: Get "https://x/v1/node": dial tcp: connect: connection refused`},
+		},
+		VMs: []api.VMStatus{{Name: "w1", Host: "hv01", State: "running"}},
+		K3s: api.K3sStatus{Reachable: true, Nodes: []api.K3sNode{{Name: "w1", Ready: true, Roles: []string{}, Version: "v1", Zone: "hv01"}}},
+		Ceph: api.CephStatus{Health: "HEALTH_WARN", Checks: []string{"HEALTH_WARN SLOW_OPS: 2 slow ops"}, OSDsTotal: 3, OSDsUp: 3, OSDsIn: 3,
+			PGsTotal: 10, PGsActiveClean: 10, AsOf: now.Add(-4 * time.Second)},
+		VIPs: []api.VIPStatus{{Name: "api", Address: "10.0.0.20", Owners: []string{"hv01"}}, {Name: "mon", Address: "10.0.0.10", Owners: []string{}}},
+	}
+	st.K3s.Nodes[0].Schedulable = false
+	var out, warn bytes.Buffer
+	printStatus(&out, &warn, st, "", now)
+	want := `HOST  STATUS       CLUSTERD  UPTIME  LOAD  MEM
+hv01  Up,LogsDown  1.0.0     3d      0.50  32%
+hv02  Unreachable  -         -       -     -
+
+VM  HOST  STATUS
+w1  hv01  Running
+
+NODE  STATUS                    ROLES   VERSION  ZONE
+w1    Ready,SchedulingDisabled  <none>  v1       hv01
+
+CEPH         OSDS UP  OSDS IN  PGS CLEAN  AGE
+HEALTH_WARN  3/3      3/3      10/10      4s
+
+VIP  ADDRESS    OWNER
+api  10.0.0.20  hv01
+mon  10.0.0.10  <unknown>
+`
+	if got := out.String(); got != want {
+		t.Errorf("status output:\n%s\nwant:\n%s", got, want)
+	}
+	for _, w := range []string{"warning: hv02: connection refused", "warning: ceph HEALTH_WARN SLOW_OPS"} {
+		if !strings.Contains(warn.String(), w) {
+			t.Errorf("missing %q in warnings:\n%s", w, warn.String())
+		}
+	}
+	out.Reset()
+	printStatus(&out, &warn, st, "vips", now)
+	if !strings.HasPrefix(out.String(), "VIP") || strings.Contains(out.String(), "HOST") {
+		t.Errorf("one section: %q", out.String())
+	}
+}
+
+func TestCompletion(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, sh := range []string{"bash", "zsh", "fish"} {
+		code, out, _ := run(t, "", "completion", sh)
+		if code != 0 || !strings.Contains(out, "vm") || strings.Contains(out, "COMMANDS") {
+			t.Errorf("%s: %d %q", sh, code, out[:min(len(out), 80)])
+		}
+	}
+	if code, out, _ := run(t, "", "__complete", "sites"); code != 0 || strings.TrimSpace(out) != "hgd1" {
+		t.Errorf("sites: %q", out)
+	}
+}
+
+func TestAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		30 * time.Second: "30s", 5 * time.Minute: "5m", 3*time.Hour + 4*time.Minute: "3h4m",
+		20 * time.Hour: "20h", 50 * time.Hour: "2d2h", 40 * 24 * time.Hour: "40d",
+	} {
+		if got := age(d); got != want {
+			t.Errorf("age(%v) = %s, want %s", d, got, want)
 		}
 	}
 }

@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 
 	"golang.org/x/term"
 
+	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/auth"
 	"github.com/jurrebuunk/clusterd/internal/client"
 	"github.com/jurrebuunk/clusterd/internal/version"
@@ -91,7 +93,7 @@ func cmdLogin(e *env, args []string) error {
 	if err := e.cfg.save(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.stdout, "Logged in to %s (%s) as %s, scope %s. Token stored in %s.\n", e.site, api, who.Name, who.Scope, path)
+	fmt.Fprintf(e.stdout, "Logged in to %s as %s (%s).\n", e.site, who.Name, who.Scope)
 	return nil
 }
 
@@ -105,14 +107,16 @@ func cmdUse(e *env, args []string) error {
 		return usageErr("usage: labctl use [site]")
 	}
 	if len(args) == 0 {
+		tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "CURRENT\tNAME\tAPI")
 		for _, n := range e.cfg.siteNames() {
-			mark := " "
+			mark := ""
 			if n == e.cfg.Current {
 				mark = "*"
 			}
-			fmt.Fprintf(e.stdout, "%s %-12s %s\n", mark, n, e.cfg.Sites[n].API)
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", mark, n, e.cfg.Sites[n].API)
 		}
-		return nil
+		return tw.Flush()
 	}
 	if _, ok := e.cfg.Sites[args[0]]; !ok {
 		return usageErr("unknown site %q; add it with labctl login --site %s --api URL", args[0], args[0])
@@ -121,7 +125,7 @@ func cmdUse(e *env, args []string) error {
 	if err := e.cfg.save(); err != nil {
 		return err
 	}
-	fmt.Fprintf(e.stdout, "Now using %s.\n", args[0])
+	fmt.Fprintf(e.stdout, "Switched to site %q.\n", args[0])
 	return nil
 }
 
@@ -140,16 +144,18 @@ func cmdWhoami(e *env, args []string) error {
 	if e.json {
 		return e.printJSON(w)
 	}
-	api, _ := e.apiURL()
-	fmt.Fprintf(e.stdout, "site     %s (%s)\ntoken    %s\nscope    %s\nserved   %s, clusterd %s\n", w.Site, api, w.Name, w.Scope, w.Host, w.Version)
-	return nil
+	tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tSCOPE\tSITE\tSERVER")
+	fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", w.Name, w.Scope, w.Site, w.Host)
+	return tw.Flush()
 }
 
 func cmdVersion(e *env, args []string) error {
 	out := map[string]string{"labctl": version.Version, "commit": version.Commit}
 	c, err := e.client()
 	if err == nil {
-		if w, werr := c.Whoami(e.ctx); werr == nil {
+		var w api.Whoami
+		if w, err = c.Whoami(e.ctx); err == nil {
 			out["clusterd"] = w.Version
 			out["served_by"] = w.Host
 		}
@@ -157,11 +163,11 @@ func cmdVersion(e *env, args []string) error {
 	if e.json {
 		return e.printJSON(out)
 	}
-	fmt.Fprintf(e.stdout, "labctl   %s\n", version.String())
+	fmt.Fprintf(e.stdout, "Client Version: %s\n", version.Version)
 	if v, ok := out["clusterd"]; ok {
-		fmt.Fprintf(e.stdout, "clusterd %s (%s, site %s)\n", v, out["served_by"], e.site)
-	} else {
-		fmt.Fprintf(e.stdout, "clusterd unknown (not logged in or API unreachable)\n")
+		fmt.Fprintf(e.stdout, "Server Version: %s\n", v)
+	} else if err != nil {
+		fmt.Fprintf(e.stderr, "warning: no server version: %v\n", err)
 	}
 	return nil
 }
@@ -203,13 +209,12 @@ func cmdToken(e *env, args []string) error {
 		if err := f.Close(); err != nil {
 			return err
 		}
-		fmt.Fprintf(e.stderr, "Token written to %s. Add this line to secrets/api-tokens.age:\n", *out)
+		fmt.Fprintf(e.stderr, "Token written to %s; add this line to the hosts' token file:\n", *out)
 		fmt.Fprintln(e.stdout, line)
 		return nil
 	}
-	fmt.Fprintln(e.stderr, "Token (shown once; give it to the client, e.g. labctl login):")
 	fmt.Fprintln(e.stdout, tok)
-	fmt.Fprintln(e.stderr, "Line for secrets/api-tokens.age:")
 	fmt.Fprintln(e.stdout, line)
+	fmt.Fprintln(e.stderr, "Line 1 is the token (shown once), line 2 goes in the hosts' token file.")
 	return nil
 }

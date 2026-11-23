@@ -14,19 +14,24 @@ status and a safe, authenticated view of metrics and logs.
 | Part | Notes |
 | --- | --- |
 | `clusterd` (server) | REST API, JSON, `/v1/...` |
-| `hgd1` (CLI) | Uses only the API; also handy while developing `clusterd` |
+| `labctl` (CLI) | Uses only the API; runs on my laptop; also handy while developing `clusterd`. Site-neutral name: it can talk to more than one site |
 | API definition | One OpenAPI file; server and client generated from it |
 | NixOS module | `services.clusterd.*` options; the cluster repo only configures it |
 
 Language: **Go** (one static binary, the official Kubernetes client, good CLI
 libraries).
 
+Why server and CLI share one repo: they share the API definition, so one
+commit changes both sides and a `clusterd` and `labctl` of the same version
+always match (the same pattern as Kubernetes and `kubectl`). They are still two
+separate programs: the hosts only get `clusterd`, the laptop only `labctl`.
+
 ## How it is installed
 
 This repo is a flake that exports:
 
 - `packages.x86_64-linux.clusterd`
-- `packages.x86_64-linux.hgd1`
+- `packages.x86_64-linux.labctl`
 - `nixosModules.clusterd`
 
 `nix-hgd1-cluster` takes it as an input and sets the options, the same split
@@ -41,6 +46,21 @@ inputs.clusterd = {
 
 Updating = `nix flake update clusterd` in the cluster repo, then a normal
 host-by-host deploy.
+
+On the laptop, `labctl` comes from the same flake:
+
+- ad hoc: `nix run github:jurrebuunk/clusterd#labctl -- status`
+- permanently: add `clusterd` as an input of `~/nixos` and
+  `inputs.clusterd.packages.x86_64-linux.labctl` to `environment.systemPackages`
+
+## labctl
+
+| | |
+| --- | --- |
+| Config | `~/.config/labctl/config.toml`: one context per site (API URL, token file), like kubeconfig contexts |
+| Token | `~/.config/labctl/token` (mode 600) for the default context |
+| Site | `labctl --site hgd1 …` or `labctl use hgd1` |
+| Env | `LABCTL_API`, `LABCTL_TOKEN`, `LABCTL_SITE` override the config |
 
 ## Runtime design (agreed)
 
@@ -74,7 +94,7 @@ host-by-host deploy.
 1. `GET /v1/health` (Keepalived uses it), `/v1/whoami`, `/v1/status`.
 2. Metrics proxy (`query`, `query_range`, `series`, `labels`) and logs proxy
    (`query`, `hits`, `streams`, follow).
-3. CLI: `login`, `whoami`, `status`, `metrics`, `logs`, `token new`.
+3. `labctl`: `login`, `use`, `whoami`, `status`, `metrics`, `logs`, `token new`.
 4. NixOS module + flake input in the cluster repo; deploy.
 5. First action: `vm restart` (drain → restart → Ready → uncordon).
 

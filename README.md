@@ -10,11 +10,12 @@ site-neutral command-line client. Two programs from one repo: the hosts run
 `clusterd` runs on every hypervisor of the
 [hgd1 cluster](https://github.com/jurrebuunk/nix-hgd1-cluster) behind one
 highly available endpoint, `https://api.lan.buunk.org`, and is the single
-authenticated way to see the platform: status of hosts, VMs, k3s and Ceph,
-and a read-only view of metrics and logs. Actions (VM restart first) arrive in
-v1.0; see [PLAN.md](PLAN.md).
+authenticated way to see and manage the platform: status of hosts, VMs, k3s
+and Ceph, a read-only view of metrics and logs, and safe actions (a VM restart
+that cordons, drains, restarts and uncordons, one at a time).
 
-**Status:** `v0.1.0`, read-only API, running on hgd1. Handbook:
+**Status:** `v1.0.0-rc.1` on hgd1; `v1.0.0` after a week of use
+([PLAN.md](PLAN.md)). Handbook:
 [Platform API](https://jurrebuunk.github.io/nix-hgd1-cluster/concepts/api/) ·
 [API reference](https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/) ·
 [CLI reference](https://jurrebuunk.github.io/nix-hgd1-cluster/reference/cli/).
@@ -31,6 +32,9 @@ labctl metrics range 'node_load1' --since 6h
 labctl logs --host hgd1-hv01 --unit ceph-osd-0.service --since 2h
 labctl logs --follow --host hgd1-fw01
 labctl --json status | jq .ceph
+labctl status nodes                      # one table: hosts, vms, nodes, ceph, vips
+labctl vm restart hgd1-k8w01             # plan, confirm, progress (operator scope)
+source <(labctl completion bash)         # zsh and fish too; Nix installs them
 ```
 
 Sites are contexts (`labctl use`, `--site`, `LABCTL_SITE`); a site without
@@ -52,7 +56,7 @@ the file, never to the terminal. Scopes nest: `read` ⊂ `operator` ⊂ `manage`
 
 ```nix
 inputs.clusterd = {
-  url = "github:jurrebuunk/clusterd/v0.1.0";
+  url = "github:jurrebuunk/clusterd/v1.0.0-rc.1";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 # modules = [ clusterd.nixosModules.clusterd ];
@@ -61,6 +65,7 @@ services.clusterd = {
   tokensFile = "/run/agenix/api-tokens";
   kubeconfigFile = "/run/agenix/clusterd-kubeconfig";   # optional
   ceph.keyringFile = "/run/agenix/clusterd-ceph-keyring"; # optional
+  manageUnitPrefixes = [ "microvm@" ];                    # polkit: what it may restart
   settings = { site = "hgd1"; host = "hgd1-hv01"; listen = [ "10.10.20.11:443" ]; hosts = [ … ]; … };
 };
 ```

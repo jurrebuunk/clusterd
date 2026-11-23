@@ -1,7 +1,8 @@
 # Plan
 
-Where this repo is going, so I can pick it up from here. Step 1 is done and
-running on the hgd1 cluster; next is [step 2](#step-2-actions-and-a-stable-api-v100).
+Where this repo is going, so I can pick it up from here. Steps 1 and 2 are
+built; `v1.0.0-rc.1` runs on the hgd1 cluster. Left for v1: a week of use,
+then tag `v1.0.0`. After that: [After v1](#after-v1).
 
 ## Goal
 
@@ -98,7 +99,8 @@ On the laptop, `labctl` comes from the same flake:
 | `api/openapi.yaml` | The API definition; handlers and client follow it (contract test in step 2) |
 | `cmd/clusterd/` | Server entry point |
 | `cmd/labctl/` | CLI entry point |
-| `internal/server/`, `internal/auth/`, `internal/config/`, `internal/proxy/`, `internal/status/`, `internal/kube/` | Server parts (`internal/actions/` arrives in step 2) |
+| `internal/server/`, `internal/auth/`, `internal/config/`, `internal/proxy/`, `internal/status/`, `internal/kube/`, `internal/actions/`, `internal/cmdrun/` | Server parts |
+| `internal/kubefake/` | In-memory Kubernetes for tests |
 | `internal/api/` | JSON types shared by server and client |
 | `internal/client/` | API client, used by `labctl` |
 | `internal/labctl/` | The CLI's commands |
@@ -199,56 +201,82 @@ through the VIP, with tokens. Nothing can be changed yet. **Done 2026-11-23.**
 ### Step 2: actions and a stable API (`v1.0.0`)
 
 Goal: the first real action, safe enough for the web UI, and a `/v1` I
-promise not to break.
+promise not to break. **Built and running as `v1.0.0-rc.1` since
+2026-11-23;** `v1.0.0` follows after a week of use (last open item).
 
 **Actions**
 
-- [ ] Action framework in `internal/actions/`: every action has a scope,
-      preflight checks, steps and an audit record.
-- [ ] Long actions stream progress as JSON lines in the response; if the
-      client disconnects, the action finishes anyway and its result is in the
-      audit log.
-- [ ] One action per target at a time, across all three instances: a
-      Kubernetes `Lease` (`clusterd-vm-<name>`) is the lock. A second request
-      gets `409`.
-- [ ] `POST /v1/actions/vms/{name}/restart` (scope `operator`): preflight
-      (VM exists in the inventory, all other nodes Ready, etcd keeps quorum),
-      cordon, drain, restart `microvm@{name}`, wait for a new boot ID and
-      Ready, uncordon. Same steps as `scripts/k3s-roll.sh`.
-- [ ] `labctl vm restart <vm>`: shows the plan, asks for confirmation
-      (`--yes` to skip), shows progress.
+- [x] Action engine in `internal/actions/`: preconditions, the lock, steps,
+      progress events and audit records; tested against an in-memory
+      Kubernetes (`internal/kubefake`).
+- [x] Long actions stream progress as JSON lines; they run detached from the
+      request, so a client that disconnects doesn't stop them; the journal
+      has every step and the result.
+- [x] One disruptive action at a time across the cluster: a Kubernetes
+      `Lease` (`clusterd/clusterd-disruption`), renewed while running,
+      expiring 2 min after a crash. A second request gets `409` naming the
+      holder. *Changed from the plan:* one lock for all VMs instead of one per
+      VM, because two restarts of different VMs at once could still cost
+      quorum or capacity.
+- [x] `POST /v1/actions/vms/{name}/restart` (scope `operator`): runs on the
+      VM's own host (other instances forward with the caller's token);
+      preconditions (VM enabled, all *other* nodes Ready, etcd quorum, no pods
+      without a controller) give `412`; cordon, drain with eviction retries on
+      disruption budgets, `systemctl restart microvm@…`, wait for a new boot
+      ID and Ready, uncordon, `/readyz`. A failed drain uncordons; a VM that
+      doesn't come back stays cordoned. `?dry_run=1` returns the plan.
+- [x] `labctl vm restart <vm>`: dry run first, confirmation (`--yes` without a
+      terminal), progress; `--dry-run` only prints the steps.
+
+**Speed and output** (added during step 2)
+
+- [x] Ceph health cached: the `ceph` CLI takes ~0.5 s, which made every
+      `status` slow. A background loop refreshes it every 10 s; concurrent
+      refreshes are merged into one; a cache older than 60 s is refreshed
+      before answering; `ceph.as_of` says how old it is. `labctl status`
+      went from ~0.7 s to under 0.2 s.
+- [x] Compact `labctl` output in the style of `kubectl`/`docker`: plain
+      tables with upper-case headers, no banners, `Ready,SchedulingDisabled`
+      style states, problems as `warning:` lines on stderr,
+      `labctl status <section>`, `Client Version`/`Server Version`. `--json`
+      is unchanged.
 
 **Privileges and audit**
 
-- [ ] Module ships the polkit rule: the `clusterd` user may only
-      `restart`/`start`/`stop` `microvm@*.service`.
-- [ ] ServiceAccount role widened to: patch nodes, create `pods/eviction`,
-      manage `leases` in its own namespace. Nothing else.
-- [ ] Audit line for every non-read request: time, token name, scope, action,
-      target, result, duration, request ID. Ends up in VictoriaLogs through
-      the journal.
+- [x] Module option `manageUnitPrefixes` writes the polkit rule: the
+      `clusterd` user may only `restart`/`start`/`stop` units with those
+      prefixes (`microvm@`). `nix flake check` runs the rule against allowed
+      and refused cases.
+- [x] ServiceAccount: read nodes and pods, patch nodes, create evictions,
+      manage Leases in its own namespace. Nothing else (checked with
+      `kubectl auth can-i`).
+- [x] `msg=audit` start and end lines for every action: action, target,
+      token, scope, request ID, result, duration.
 
 **v1 quality**
 
-- [ ] OpenAPI frozen for `/v1`: from here only additive changes; anything
-      breaking goes to `/v2`.
-- [ ] Contract test: the server is checked against `api/openapi.yaml` in CI.
-- [ ] Integration tests against fakes for systemd (D-Bus), Kubernetes
-      (`envtest` or fake clientset), Ceph and the stores.
-- [ ] Shell completion for `labctl` (bash, zsh, fish).
-- [ ] `v1.0.0-rc.1` deployed and used for a week before `v1.0.0`.
-- [ ] Handbook: status badges of the API, CLI and their reference pages go
-      from *In development* to *Done*.
+- [x] OpenAPI `1.0.0`; `/v1` frozen: from here only additive changes.
+- [x] Contract test: every route and scope matches the spec both ways, and
+      real responses (including each stream line) match their schemas: no
+      undocumented fields, required ones present.
+- [x] Tests with fakes for Kubernetes, `systemctl`, Ceph and the stores.
+- [x] Shell completion (`labctl completion bash|zsh|fish`, installed by the
+      Nix package), with VM, host and site names.
+- [x] `v1.0.0-rc.1` deployed.
+- [ ] Used for a week, then `v1.0.0` (bump `VERSION`, tag, pin it in the
+      cluster repo and on the laptop).
+- [x] Handbook describes `v1.0.0-rc.1` as built and tested.
 
 **Done when**
 
-- A rolling restart of all five k3s VMs with `labctl vm restart`, one by
-  one, causes no API downtime.
-- Two restarts of the same VM at once: the second gets `409`.
-- Every action shows up in `labctl logs --unit clusterd.service`.
-- An `operator` token (what `lab-console` will use) can restart a VM, a
-  `read` token can't.
-- `v1.0.0` is published and deployed.
+- [x] A rolling restart of all five k3s VMs with `labctl vm restart`, one by
+      one (agents, then servers, 29–44 s each), with no API errors: 161 of
+      161 status requests answered, the Kubernetes API probes never failed.
+- [x] Two restarts at once: the second (same VM or another) gets `409`.
+- [x] Every action shows up in `labctl logs --unit clusterd audit`.
+- [x] An `operator` token restarted a VM (through a forward from hv02 to
+      hv03); a `read` token gets `403`.
+- [ ] `v1.0.0` is published and deployed (after the week).
 
 ### After v1
 

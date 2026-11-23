@@ -39,9 +39,11 @@ func printStatus(w io.Writer, st api.Status) {
 
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "\nHOST\tSTATE\tCLUSTERD\tUPTIME\tLOAD\tMEM\tSTORES")
+	unreachable := 0
 	for _, h := range st.Hosts {
 		if !h.Reachable {
-			fmt.Fprintf(tw, "%s\tunreachable\t-\t-\t-\t-\t%s\n", h.Name, h.Error)
+			unreachable++
+			fmt.Fprintf(tw, "%s\tunreachable\t-\t-\t-\t-\t(%s)\n", h.Name, shortError(h.Error))
 			continue
 		}
 		stores := "ok"
@@ -106,6 +108,10 @@ func printStatus(w io.Writer, st api.Status) {
 		switch len(v.Owners) {
 		case 0:
 			owner = "none"
+			if unreachable > 0 {
+				// It may be on a host we can't ask.
+				owner = "unknown"
+			}
 		case 1:
 		default:
 			owner += " (split brain!)"
@@ -113,6 +119,18 @@ func printStatus(w io.Writer, st api.Status) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", v.Name, v.Address, owner)
 	}
 	tw.Flush()
+}
+
+// shortError keeps the last, most specific part of a Go error chain, e.g.
+// "connection refused" or "context deadline exceeded".
+func shortError(s string) string {
+	if i := strings.LastIndex(s, ": "); i >= 0 {
+		s = s[i+2:]
+	}
+	if j := strings.Index(s, " (Client.Timeout"); j >= 0 {
+		s = s[:j]
+	}
+	return s
 }
 
 func uptime(s int64) string {

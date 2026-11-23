@@ -1,19 +1,83 @@
 # clusterd
 
+[![CI](https://github.com/jurrebuunk/clusterd/actions/workflows/ci.yml/badge.svg)](https://github.com/jurrebuunk/clusterd/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jurrebuunk/clusterd?include_prereleases&sort=semver)](https://github.com/jurrebuunk/clusterd/releases)
+
 The platform API for my homelab (`clusterd`), plus `labctl`, its
 site-neutral command-line client. Two programs from one repo: the hosts run
 `clusterd`, my laptop runs `labctl`.
+
 `clusterd` runs on every hypervisor of the
 [hgd1 cluster](https://github.com/jurrebuunk/nix-hgd1-cluster) behind one
 highly available endpoint, `https://api.lan.buunk.org`, and is the single
-authenticated way to see and manage the platform.
+authenticated way to see the platform: status of hosts, VMs, k3s and Ceph,
+and a read-only view of metrics and logs. Actions (VM restart first) arrive in
+v1.0; see [PLAN.md](PLAN.md).
 
-[![Release](https://img.shields.io/github/v/release/jurrebuunk/clusterd?include_prereleases&sort=semver)](https://github.com/jurrebuunk/clusterd/releases)
-[![Release workflow](https://github.com/jurrebuunk/clusterd/actions/workflows/release.yml/badge.svg)](https://github.com/jurrebuunk/clusterd/actions/workflows/release.yml)
+**Status:** `v0.1.0`, read-only API, running on hgd1. Handbook:
+[Platform API](https://jurrebuunk.github.io/nix-hgd1-cluster/concepts/api/) ·
+[API reference](https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/) ·
+[CLI reference](https://jurrebuunk.github.io/nix-hgd1-cluster/reference/cli/).
 
-**Status:** planning; the road to v1 is in [PLAN.md](PLAN.md). Releases
-(binaries for `clusterd` and `labctl`) are published on
-[GitHub Releases](https://github.com/jurrebuunk/clusterd/releases) from
-version tags.
+## labctl
 
-Handbook: <https://jurrebuunk.github.io/nix-hgd1-cluster/concepts/api/>
+```sh
+nix run github:jurrebuunk/clusterd#labctl -- --help     # or a binary from Releases
+
+labctl login                      # asks for a token, checks it, stores it (600)
+labctl status                     # hosts, VMs, k3s, Ceph, VIP owners
+labctl metrics query 'up == 0'
+labctl metrics range 'node_load1' --since 6h
+labctl logs --host hgd1-hv01 --unit ceph-osd-0.service --since 2h
+labctl logs --follow --host hgd1-fw01
+labctl --json status | jq .ceph
+```
+
+Sites are contexts (`labctl use`, `--site`, `LABCTL_SITE`); a site without
+config is `hgd1` at `https://api.lan.buunk.org`. Exit codes: 0 ok, 1 API
+error, 2 usage, 3 unreachable (check WARP), 4 token missing, invalid or not
+allowed.
+
+## Tokens
+
+```sh
+labctl token new --name laptop-jurre --scope manage --out ~/.config/labctl/tokens/hgd1
+```
+
+prints the line `laptop-jurre manage sha256:…` for the hosts' token file
+(`secrets/api-tokens.age` in the cluster repo) and writes the token itself to
+the file, never to the terminal. Scopes nest: `read` ⊂ `operator` ⊂ `manage`.
+
+## On a NixOS host
+
+```nix
+inputs.clusterd = {
+  url = "github:jurrebuunk/clusterd/v0.1.0";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+# modules = [ clusterd.nixosModules.clusterd ];
+services.clusterd = {
+  enable = true;
+  tokensFile = "/run/agenix/api-tokens";
+  kubeconfigFile = "/run/agenix/clusterd-kubeconfig";   # optional
+  ceph.keyringFile = "/run/agenix/clusterd-ceph-keyring"; # optional
+  settings = { site = "hgd1"; host = "hgd1-hv01"; listen = [ "10.10.20.11:443" ]; hosts = [ … ]; … };
+};
+```
+
+All settings are in [`internal/config/config.go`](internal/config/config.go);
+the hgd1 wiring is
+[`modules/clusterd/`](https://github.com/jurrebuunk/nix-hgd1-cluster/tree/main/modules/clusterd)
+in the cluster repo.
+
+## Develop
+
+```sh
+nix develop                # go, gopls, goreleaser
+go test -race ./...
+nix flake check            # packages, module, config check
+```
+
+Point `labctl` at one instance with `LABCTL_API=https://10.10.20.12`… or at a
+local `clusterd --config dev.toml` without TLS (`http://127.0.0.1:8080`).
+Releases: bump `VERSION`, tag `v<VERSION>`, push; see [PLAN.md](PLAN.md#releases).

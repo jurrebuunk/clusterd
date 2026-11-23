@@ -1,8 +1,7 @@
 # Plan
 
-Where this repo is going, so I can pick it up from here. The release pipeline
-exists; the code doesn't yet. Work through [Road to v1](#road-to-v1) top to
-bottom.
+Where this repo is going, so I can pick it up from here. Step 1 is done and
+running on the hgd1 cluster; next is [step 2](#step-2-actions-and-a-stable-api-v100).
 
 ## Goal
 
@@ -61,9 +60,9 @@ On the laptop, `labctl` comes from the same flake:
 | | |
 | --- | --- |
 | Config | `~/.config/labctl/config.toml`: one context per site (API URL, token file), like kubeconfig contexts |
-| Token | `~/.config/labctl/token` (mode 600) for the default context |
+| Token | `~/.config/labctl/tokens/<site>` (mode 600) |
 | Site | `labctl --site hgd1 …` or `labctl use hgd1` |
-| Env | `LABCTL_API`, `LABCTL_TOKEN`, `LABCTL_SITE` override the config |
+| Env | `LABCTL_API`, `LABCTL_TOKEN` (the token itself), `LABCTL_SITE` override the config |
 
 ## Runtime design (agreed)
 
@@ -96,11 +95,13 @@ On the laptop, `labctl` comes from the same flake:
 
 | Path | Holds |
 | --- | --- |
-| `api/openapi.yaml` | The API definition; server stubs and the client are generated from it (`oapi-codegen`) |
+| `api/openapi.yaml` | The API definition; handlers and client follow it (contract test in step 2) |
 | `cmd/clusterd/` | Server entry point |
 | `cmd/labctl/` | CLI entry point |
-| `internal/server/`, `internal/auth/`, `internal/proxy/`, `internal/status/`, `internal/actions/` | Server parts |
-| `internal/client/` | Generated API client, used by `labctl` |
+| `internal/server/`, `internal/auth/`, `internal/config/`, `internal/proxy/`, `internal/status/`, `internal/kube/` | Server parts (`internal/actions/` arrives in step 2) |
+| `internal/api/` | JSON types shared by server and client |
+| `internal/client/` | API client, used by `labctl` |
+| `internal/labctl/` | The CLI's commands |
 | `internal/version/` | `Version`, `Commit`, `Date`, set at build time |
 | `nix/package.nix`, `nix/module.nix` | Packages and `nixosModules.clusterd` |
 | `VERSION` | The version, without `v`; the only place it is written down |
@@ -110,74 +111,90 @@ On the laptop, `labctl` comes from the same flake:
 Two steps. Each ends with a tagged release that runs on the cluster, so
 there is always a working version to come back to.
 
-### Step 1: read-only API (`v0.1.0`)
+### Step 1: read-only API (`v0.1.0`) ✅
 
 Goal: `labctl status`, `metrics` and `logs` work from my laptop over WARP,
-through the VIP, with tokens. Nothing can be changed yet.
+through the VIP, with tokens. Nothing can be changed yet. **Done 2026-11-23.**
 
 **Server**
 
-- [ ] `api/openapi.yaml` with every v1 endpoint from the handbook's
-      [API reference](https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/),
-      generated server interface and client.
-- [ ] Config file (TOML) set by the NixOS module: listen address, TLS cert
-      and key, token file, store URLs, kubeconfig, Ceph keyring.
-- [ ] Auth: tokens are 32 random bytes, stored as SHA-256 hashes
-      (`name scope hash` per line). Constant-time compare. Scopes nest:
-      `manage` ⊃ `operator` ⊃ `read`. Token file re-read on `SIGHUP`.
-- [ ] `GET /v1/health`: this process and its local stores answer.
-- [ ] `GET /v1/whoami`: token name, scope, and server version.
-- [ ] `GET /v1/status`: hosts, VMs (`microvm@*`), k3s nodes, Ceph health,
-      VIP owners. Each source has a timeout; a source that fails is reported as
-      `unknown`, never fails the whole call.
-- [ ] Metrics and logs proxy: allow-list of query paths only, local store
-      first, peer fallback, response size and time limits, `?follow=1`
-      streaming for logs.
-- [ ] Hardening: request timeouts, body limits, JSON errors
-      `{"error": …}`, request IDs, structured logs to the journal.
-- [ ] Own metrics on `127.0.0.1:9180/metrics` (requests, latency, upstream
-      errors) for vmagent.
+- [x] `api/openapi.yaml` with every v1 endpoint (validated with
+      `openapi-spec-validator`). Handlers and client are written by hand
+      against it instead of generated: the proxy endpoints pass bodies through
+      untouched, which generated code fits badly. The contract test that keeps
+      them in line is part of step 2.
+- [x] Config file (TOML) written by the NixOS module; unknown keys are an
+      error, `clusterd --check` validates config and tokens (runs as
+      `ExecStartPre`).
+- [x] Auth: tokens are `lab_` + 32 random bytes, stored as SHA-256 hashes
+      (`name scope sha256:hex` per line), compared in constant time against
+      every entry. Scopes nest. Tokens and certificate reload on `SIGHUP`
+      (`systemctl reload clusterd`, also run by ACME after renewal).
+- [x] `GET /v1/health`: 200 while this instance serves. It deliberately does
+      not depend on the stores: the proxy falls back to peers, so a dead local
+      store must not take the API down with it.
+- [x] `GET /v1/whoami`: token name, scope, answering host, server version.
+- [x] `GET /v1/node` (new): this host's facts. `/v1/status` asks every peer's
+      `/v1/node` with the caller's own token, so instances need no shared
+      credential and a peer only answers callers it would answer itself.
+- [x] `GET /v1/status`: hosts, VMs (`microvm@*`), k3s nodes, Ceph health, VIP
+      owners. Each source has a timeout; failures are reported in place.
+- [x] Metrics and logs proxy: allow-listed query paths only, local store
+      first, peers on connection errors and 5xx, 64 MiB cap, 30 s timeout,
+      `?follow=1` streams VictoriaLogs' tail for at most 1 h, default log
+      `limit` 1000. The caller's token is never sent upstream.
+- [x] Hardening: header/read timeouts, body limit, JSON errors, request IDs,
+      access log to the journal (paths only, never query strings), TLS 1.2+.
+- [x] Own metrics on `127.0.0.1:9180/metrics`: requests, latency, auth
+      failures, upstream errors and fallbacks, build info.
 
 **labctl**
 
-- [ ] `login`, `use`, `whoami`, `status`, `metrics query|range`, `logs`,
-      `token new`, `version` (client and server).
-- [ ] Contexts in `~/.config/labctl/config.toml`, env overrides, `--json`,
-      the exit codes from the handbook (0–4).
+- [x] `login`, `use`, `whoami`, `status`, `metrics query|range`, `logs`,
+      `token new`, `version`.
+- [x] Contexts in `~/.config/labctl/config.toml`, tokens in
+      `~/.config/labctl/tokens/<site>` (600), env overrides, `--json`, exit
+      codes 0–4. `token new --out FILE` writes the token without printing it;
+      `login --token-file FILE` reads it.
 
 **Packaging**
 
-- [ ] `flake.nix`: `packages.{clusterd,labctl}` (`buildGoModule`,
-      version from `VERSION`), `nixosModules.clusterd`, dev shell, `checks`.
-- [ ] Module: `services.clusterd` with a fixed system user `clusterd` (the
-      polkit rule needs a stable name),
-      systemd sandboxing (`ProtectSystem=strict`, no new privileges, only the
-      needed `ReadOnlyPaths`), credentials through `LoadCredential`.
-- [ ] CI on pushes and PRs: `go vet`, `go test -race`, `nix flake check`.
+- [x] `flake.nix`: `packages.{clusterd,labctl}` (labctl also for macOS),
+      `nixosModules.clusterd`, dev shell, `checks` (packages with tests, the
+      module's unit, a `--check` of the generated config).
+- [x] Module: fixed system user `clusterd`, `CAP_NET_BIND_SERVICE` only,
+      `ProtectSystem=strict` and friends, secrets through `LoadCredential`.
+- [x] CI on pushes and PRs: gofmt, `go vet`, `go test -race`,
+      `nix flake check`.
 - [x] Release CI: `.github/workflows/release.yml` + `.goreleaser.yaml`
       (see [Releases](#releases)).
 
 **Cluster repo (`nix-hgd1-cluster`)**
 
-- [ ] `inventory.nix` → `api` (`api.lan.buunk.org`, VIP `10.10.20.20`,
+- [x] `inventory.nix` → `api` (`api.lan.buunk.org`, VIP `10.10.20.20`,
       VRRP 21).
-- [ ] `modules/clusterd/`: `default.nix`, `tls.nix` (DNS-01), `vip.nix`
-      (Keepalived on `/v1/health`), `firewall.nix`.
-- [ ] Secrets: `api-tokens.age`, `clusterd-kubeconfig.age` (read-only
-      ServiceAccount: `get`/`list` nodes and pods), Ceph key
-      `client.clusterd` with `mon 'allow r'`.
-- [ ] DNS override `api.lan.buunk.org` in `hgd1-network`.
-- [ ] Scrape `clusterd` metrics in the monitoring config.
+- [x] `modules/clusterd/`: `default.nix`, `tls.nix` (DNS-01), `vip.nix`
+      (Keepalived on `/v1/health` with full certificate check),
+      `firewall.nix`.
+- [x] Secrets: `api-tokens.age`, `clusterd-kubeconfig.age` (ServiceAccount
+      `clusterd/clusterd`, `get`/`list` on nodes and pods only, declared as a
+      k3s manifest in `modules/microvm/guest/k3s/clusterd.nix`),
+      `clusterd-ceph-keyring.age` (`client.clusterd`, `mon 'allow r'`).
+- [x] DNS override `api.lan.buunk.org` on OPNsense (moves to `hgd1-network`).
+- [x] Monitoring: scrapes `clusterd` on every host, probes
+      `https://api.lan.buunk.org/v1/health`, pings the VIP.
 
 **Done when**
 
-- `labctl status` works over WARP from the laptop.
-- No token → 401, `read` token on an action path → 403.
-- Write and admin paths of VictoriaMetrics/VictoriaLogs are not reachable
-  through the API.
-- Stopping `clusterd` on the VIP owner moves the VIP; `labctl status` keeps
-  working.
-- `v0.1.0` is published on GitHub Releases and deployed from that tag.
+- [x] `labctl status` works over WARP from the laptop.
+- [x] No token → 401, invalid token → 401, `read` token on an action path →
+      403 (a `manage` token gets 404: no actions yet).
+- [x] Write and admin paths of VictoriaMetrics/VictoriaLogs are not reachable
+      through the API (404, also with `..` tricks).
+- [x] Stopping `clusterd` on the VIP owner moved the VIP to hv02; a client
+      polling 5×/s saw 8 of 116 requests fail (about 2 s), and
+      `labctl status` kept working, showing hv01 as unreachable.
+- [x] `v0.1.0` is published on GitHub Releases and deployed from that tag.
 
 ### Step 2: actions and a stable API (`v1.0.0`)
 

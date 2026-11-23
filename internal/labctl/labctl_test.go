@@ -167,3 +167,15 @@ func TestBuildLogsQuery(t *testing.T) {
 		t.Error("negative duration accepted")
 	}
 }
+
+func TestShortError(t *testing.T) {
+	for in, want := range map[string]string{
+		`unreachable: Get "https://10.10.20.11/v1/node": dial tcp 10.10.20.11:443: connect: connection refused`:                      "connection refused",
+		`unreachable: Get "https://10.10.20.12/v1/node": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`: "context deadline exceeded",
+		"plain": "plain",
+	} {
+		if got := shortError(in); got != want {
+			t.Errorf("shortError(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

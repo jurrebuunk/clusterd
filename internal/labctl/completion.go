@@ -28,7 +28,7 @@ _labctl() {
   case "$cmd" in
     "") COMPREPLY=($(compgen -W "COMMANDS --site --json" -- "$cur")) ;;
     use) COMPREPLY=($(compgen -W "$(labctl __complete sites 2>/dev/null)" -- "$cur")) ;;
-    status) [ -z "$sub" ] && COMPREPLY=($(compgen -W "hosts vms nodes ceph vips" -- "$cur")) ;;
+    status) [ -z "$sub" ] && COMPREPLY=($(compgen -W "hosts vms nodes ceph vips disks s3" -- "$cur")) ;;
     metrics) if [ -z "$sub" ]; then COMPREPLY=($(compgen -W "query range" -- "$cur")); else COMPREPLY=($(compgen -W "--since --step --time" -- "$cur")); fi ;;
     logs) COMPREPLY=($(compgen -W "--host --unit --since --limit --follow" -- "$cur")) ;;
     vm) if [ -z "$sub" ]; then COMPREPLY=($(compgen -W "restart" -- "$cur")); else COMPREPLY=($(compgen -W "$(labctl __complete vms 2>/dev/null) --yes --dry-run" -- "$cur")); fi ;;
@@ -46,7 +46,7 @@ complete -c labctl -l site -r -a '(labctl __complete sites 2>/dev/null)' -d 'Sit
 complete -c labctl -l json -d 'JSON output'
 complete -c labctl -n __fish_use_subcommand -a 'COMMANDS'
 complete -c labctl -n '__fish_seen_subcommand_from use' -a '(labctl __complete sites 2>/dev/null)'
-complete -c labctl -n '__fish_seen_subcommand_from status' -a 'hosts vms nodes ceph vips'
+complete -c labctl -n '__fish_seen_subcommand_from status' -a 'hosts vms nodes ceph vips disks s3'
 complete -c labctl -n '__fish_seen_subcommand_from metrics; and not __fish_seen_subcommand_from query range' -a 'query range'
 complete -c labctl -n '__fish_seen_subcommand_from metrics' -l since -r
 complete -c labctl -n '__fish_seen_subcommand_from metrics' -l step -r

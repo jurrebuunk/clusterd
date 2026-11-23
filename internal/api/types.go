@@ -60,6 +60,23 @@ type Status struct {
 	K3s         K3sStatus    `json:"k3s"`
 	Ceph        CephStatus   `json:"ceph"`
 	VIPs        []VIPStatus  `json:"vips"`
+	Disks       DisksStatus  `json:"disks"`
+	S3          S3Status     `json:"s3"`
+}
+
+// HostsStatus is GET /v1/status/hosts.
+type HostsStatus struct {
+	Hosts []HostStatus `json:"hosts"`
+}
+
+// VMsStatus is GET /v1/status/vms.
+type VMsStatus struct {
+	VMs []VMStatus `json:"vms"`
+}
+
+// VIPsStatus is GET /v1/status/vips.
+type VIPsStatus struct {
+	VIPs []VIPStatus `json:"vips"`
 }
 
 // HostStatus is one hypervisor in /v1/status.
@@ -119,7 +136,11 @@ type CephStatus struct {
 	OSDsIn         int      `json:"osds_in"`
 	PGsTotal       int      `json:"pgs_total"`
 	PGsActiveClean int      `json:"pgs_active_clean"`
-	Error          string   `json:"error,omitempty"`
+	// Raw capacity over all OSDs (every object is stored three times).
+	BytesTotal int64  `json:"bytes_total"`
+	BytesUsed  int64  `json:"bytes_used"`
+	BytesAvail int64  `json:"bytes_avail"`
+	Error      string `json:"error,omitempty"`
 	// AsOf is when Ceph was asked; the API refreshes it every 10 s.
 	AsOf time.Time `json:"as_of"`
 }
@@ -159,4 +180,98 @@ type RestartPlan struct {
 	Steps   []string `json:"steps"`
 	// LockHolder is set when another action holds the lock right now.
 	LockHolder string `json:"lock_holder,omitempty"`
+}
+
+// DisksStatus is GET /v1/status/disks: physical disks with how full they
+// are, filesystems of hosts and VMs, and Ceph OSDs. From the monitoring
+// stores (SMART and node metrics, at most ~30 s old) and Ceph (~60 s).
+type DisksStatus struct {
+	Disks       []Disk       `json:"disks"`
+	Filesystems []Filesystem `json:"filesystems"`
+	OSDs        []OSD        `json:"osds"`
+	Errors      []string     `json:"errors,omitempty"`
+}
+
+// Disk is one physical drive.
+type Disk struct {
+	Host   string `json:"host"`
+	Device string `json:"device"` // nvme0, sda
+	Type   string `json:"type"`   // nvme, hdd, ssd
+	Model  string `json:"model"`
+	Serial string `json:"serial"`
+	// Role is what the drive holds: "system", "osd.N" or "" when unknown.
+	Role        string  `json:"role"`
+	SizeBytes   int64   `json:"size_bytes"`
+	UsedBytes   int64   `json:"used_bytes"`
+	UsedPercent float64 `json:"used_percent"`
+	// WearPercent is the NVMe "percentage used" (endurance), absent for HDDs.
+	WearPercent  *float64 `json:"wear_percent,omitempty"`
+	TemperatureC float64  `json:"temperature_c"`
+	Healthy      bool     `json:"healthy"` // SMART overall assessment
+	PowerOnHours int64    `json:"power_on_hours"`
+	MediaErrors  *int64   `json:"media_errors,omitempty"`
+}
+
+// Filesystem is one mounted filesystem on a host or a VM.
+type Filesystem struct {
+	Host        string  `json:"host"` // host or VM name
+	Mountpoint  string  `json:"mountpoint"`
+	Device      string  `json:"device"`
+	FSType      string  `json:"fstype"`
+	SizeBytes   int64   `json:"size_bytes"`
+	UsedBytes   int64   `json:"used_bytes"`
+	UsedPercent float64 `json:"used_percent"`
+}
+
+// OSD is one Ceph OSD.
+type OSD struct {
+	ID          int     `json:"id"`
+	Host        string  `json:"host"`
+	Device      string  `json:"device"`
+	DeviceClass string  `json:"device_class"`
+	SizeBytes   int64   `json:"size_bytes"`
+	UsedBytes   int64   `json:"used_bytes"`
+	UsedPercent float64 `json:"used_percent"`
+	Up          bool    `json:"up"`
+	In          bool    `json:"in"`
+}
+
+// S3Status is GET /v1/status/s3: the object store behind the S3 endpoint.
+type S3Status struct {
+	Endpoint string      `json:"endpoint"`
+	Gateways []S3Gateway `json:"gateways"`
+	Users    int         `json:"users"`
+	Buckets  []S3Bucket  `json:"buckets"`
+	Objects  int64       `json:"objects"`
+	// SizeBytes is what the buckets hold (one copy).
+	SizeBytes int64  `json:"size_bytes"`
+	Pool      S3Pool `json:"pool"`
+	// CertExpires is when the endpoint's certificate expires.
+	CertExpires *time.Time `json:"cert_expires,omitempty"`
+	Errors      []string   `json:"errors,omitempty"`
+}
+
+// S3Gateway is one RGW behind the endpoint.
+type S3Gateway struct {
+	Host string `json:"host"`
+	Up   bool   `json:"up"`
+}
+
+// S3Bucket is one bucket. Quotas of 0 mean none.
+type S3Bucket struct {
+	Name         string     `json:"name"`
+	Owner        string     `json:"owner"`
+	Objects      int64      `json:"objects"`
+	SizeBytes    int64      `json:"size_bytes"`
+	QuotaBytes   int64      `json:"quota_bytes"`
+	QuotaObjects int64      `json:"quota_objects"`
+	Created      *time.Time `json:"created,omitempty"`
+}
+
+// S3Pool is the Ceph pool holding the object data: how full the store is.
+type S3Pool struct {
+	Name          string  `json:"name"`
+	StoredBytes   int64   `json:"stored_bytes"`
+	MaxAvailBytes int64   `json:"max_avail_bytes"`
+	UsedPercent   float64 `json:"used_percent"`
 }

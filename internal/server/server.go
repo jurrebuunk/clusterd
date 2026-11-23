@@ -101,6 +101,27 @@ func (s *Server) routes() []route {
 		{"GET /v1/whoami", "whoami", auth.ScopeRead, false, s.whoami},
 		{"GET /v1/node", "node", auth.ScopeRead, false, s.node},
 		{"GET /v1/status", "status", auth.ScopeRead, false, s.statusAll},
+		{"GET /v1/status/hosts", "status_hosts", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.Hosts(r.Context(), callerFrom(r.Context()).raw))
+		}},
+		{"GET /v1/status/vms", "status_vms", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.VMs(r.Context(), callerFrom(r.Context()).raw))
+		}},
+		{"GET /v1/status/k3s", "status_k3s", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.K3s(r.Context()))
+		}},
+		{"GET /v1/status/ceph", "status_ceph", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.Ceph(r.Context()))
+		}},
+		{"GET /v1/status/vips", "status_vips", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.VIPs(r.Context(), callerFrom(r.Context()).raw))
+		}},
+		{"GET /v1/status/disks", "status_disks", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.Disks(r.Context()))
+		}},
+		{"GET /v1/status/s3", "status_s3", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.S3(r.Context()))
+		}},
 
 		{"GET /v1/metrics/query", "metrics_query", auth.ScopeRead, false, s.metricsRoute("/api/v1/query")},
 		{"GET /v1/metrics/query_range", "metrics_query_range", auth.ScopeRead, false, s.metricsRoute("/api/v1/query_range")},

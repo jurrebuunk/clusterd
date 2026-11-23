@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/auth"
 	"github.com/jurrebuunk/clusterd/internal/config"
+	"github.com/jurrebuunk/clusterd/internal/fakestore"
 	"github.com/jurrebuunk/clusterd/internal/kube"
 	"github.com/jurrebuunk/clusterd/internal/kubefake"
 	"github.com/jurrebuunk/clusterd/internal/status"
@@ -31,8 +34,11 @@ type actionHarness struct {
 
 func newActionHarness(t *testing.T) *actionHarness {
 	h := &actionHarness{fake: kubefake.New(), tokens: map[auth.Scope]string{}}
-	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	store, rgw := fakestore.Store(), fakestore.RGW()
 	t.Cleanup(store.Close)
+	t.Cleanup(rgw.Close)
+	cred := filepath.Join(t.TempDir(), "s3")
+	os.WriteFile(cred, []byte(`{"access_key":"AK","secret_key":"SK"}`), 0o600)
 	var lines []string
 	for _, sc := range []auth.Scope{auth.ScopeRead, auth.ScopeOperator, auth.ScopeManage} {
 		tok, _ := auth.Generate()
@@ -41,7 +47,8 @@ func newActionHarness(t *testing.T) *actionHarness {
 	}
 	parsed, _ := auth.Parse(strings.NewReader(strings.Join(lines, "\n")))
 	cfg := &config.Config{Site: "lab", Host: "hv1", ServerName: "api.test"}
-	cfg.Hosts = []config.Host{{Name: "hv1", API: "http://unused", Metrics: store.URL, Logs: store.URL}}
+	cfg.Hosts = []config.Host{{Name: "hv1", API: "http://unused", Metrics: store.URL, Logs: store.URL, RGW: rgw.URL}}
+	cfg.S3.Endpoint, cfg.S3.Credentials, cfg.S3.DataPool = "https://s3.test", cred, "default.rgw.buckets.data"
 	for _, vm := range []string{"m1", "m2", "m3", "w1"} {
 		cfg.VMs = append(cfg.VMs, config.VM{Name: vm, Host: "hv1", Enabled: true})
 	}

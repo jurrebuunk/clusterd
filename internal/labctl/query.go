@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,146 +15,299 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/api"
 )
 
-var statusSections = []string{"hosts", "vms", "nodes", "ceph", "vips"}
+var statusSections = []string{"hosts", "vms", "nodes", "ceph", "vips", "disks", "s3"}
+
+// statusParts maps a section to its API endpoint.
+var statusParts = map[string]string{
+	"hosts": "/v1/status/hosts", "vms": "/v1/status/vms", "nodes": "/v1/status/k3s", "ceph": "/v1/status/ceph",
+	"vips": "/v1/status/vips", "disks": "/v1/status/disks", "s3": "/v1/status/s3",
+}
 
 func cmdStatus(e *env, args []string) error {
 	if len(args) > 1 {
 		return usageErr("usage: labctl status [%s]", strings.Join(statusSections, "|"))
 	}
-	section := ""
-	if len(args) == 1 {
-		aliases := map[string]string{"host": "hosts", "vm": "vms", "node": "nodes", "vip": "vips"}
-		section = args[0]
-		if full, ok := aliases[section]; ok {
-			section = full
-		}
-		if !slices.Contains(statusSections, section) {
-			return usageErr("unknown section %q (want %s)", args[0], strings.Join(statusSections, ", "))
-		}
-	}
 	c, err := e.client()
 	if err != nil {
 		return err
 	}
-	st, err := c.Status(e.ctx)
-	if err != nil {
+	now := time.Now()
+	if len(args) == 0 {
+		st, err := c.Status(e.ctx)
+		if err != nil {
+			return err
+		}
+		if e.json {
+			return e.printJSON(st)
+		}
+		printStatus(e.stdout, e.stderr, st, now)
+		return nil
+	}
+
+	aliases := map[string]string{"host": "hosts", "vm": "vms", "node": "nodes", "k3s": "nodes", "vip": "vips", "disk": "disks"}
+	section := args[0]
+	if full, ok := aliases[section]; ok {
+		section = full
+	}
+	path, ok := statusParts[section]
+	if !ok {
+		return usageErr("unknown section %q (want %s)", args[0], strings.Join(statusSections, ", "))
+	}
+	var raw json.RawMessage
+	if err := c.Get(e.ctx, path, nil, &raw); err != nil {
 		return err
 	}
 	if e.json {
-		return e.printJSON(st)
+		return e.printJSON(raw)
 	}
-	printStatus(e.stdout, e.stderr, st, section, time.Now())
-	return nil
+	tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
+	switch section {
+	case "hosts":
+		var v api.HostsStatus
+		json.Unmarshal(raw, &v)
+		printHosts(tw, e.stderr, v.Hosts)
+	case "vms":
+		var v api.VMsStatus
+		json.Unmarshal(raw, &v)
+		printVMs(tw, v.VMs)
+	case "nodes":
+		var v api.K3sStatus
+		json.Unmarshal(raw, &v)
+		printNodes(tw, e.stderr, v)
+	case "ceph":
+		var v api.CephStatus
+		json.Unmarshal(raw, &v)
+		printCeph(tw, e.stderr, v, now)
+	case "vips":
+		var v api.VIPsStatus
+		json.Unmarshal(raw, &v)
+		// Owners we can't see are reported by the hosts part; here only VIPs.
+		printVIPs(tw, e.stderr, v.VIPs, false)
+	case "disks":
+		var v api.DisksStatus
+		json.Unmarshal(raw, &v)
+		printDisks(tw, e.stdout, e.stderr, v)
+	case "s3":
+		var v api.S3Status
+		json.Unmarshal(raw, &v)
+		printS3(tw, e.stdout, e.stderr, v, now)
+	}
+	return tw.Flush()
 }
 
-// printStatus prints kubectl-style tables: one per section, a blank line
-// between them, problems as warnings on stderr.
-func printStatus(w, warn io.Writer, st api.Status, only string, now time.Time) {
-	first := true
-	section := func(name string) *tabwriter.Writer {
-		if only != "" && only != name {
-			return nil
-		}
-		if !first {
-			fmt.Fprintln(w)
-		}
-		first = false
-		return tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	}
+// printStatus prints every section as kubectl-style tables with a blank line
+// between them; problems go to warn as "warning:" lines.
+func printStatus(w, warn io.Writer, st api.Status, now time.Time) {
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	gap := func() { tw.Flush(); fmt.Fprintln(w) }
+	unreachable := printHosts(tw, warn, st.Hosts)
+	gap()
+	printVMs(tw, st.VMs)
+	gap()
+	printNodes(tw, warn, st.K3s)
+	gap()
+	printCeph(tw, warn, st.Ceph, now)
+	gap()
+	printVIPs(tw, warn, st.VIPs, unreachable > 0)
+	gap()
+	printDisks(tw, w, warn, st.Disks)
+	gap()
+	printS3(tw, w, warn, st.S3, now)
+	tw.Flush()
+}
 
-	unreachable := 0
-	if tw := section("hosts"); tw != nil {
-		fmt.Fprintln(tw, "HOST\tSTATUS\tCLUSTERD\tUPTIME\tLOAD\tMEM")
-		for _, h := range st.Hosts {
-			if !h.Reachable {
-				unreachable++
-				fmt.Fprintf(tw, "%s\tUnreachable\t-\t-\t-\t-\n", h.Name)
-				fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, shortError(h.Error))
-				continue
-			}
-			status := "Up"
-			for _, s := range h.Stores {
-				if !s.OK {
-					status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
-				}
-			}
-			if h.Error != "" {
-				fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, h.Error)
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.0f%%\n", h.Name, status, h.Version, age(time.Duration(h.UptimeSeconds)*time.Second), h.Load1, h.MemUsedPercent)
+func printHosts(tw *tabwriter.Writer, warn io.Writer, hosts []api.HostStatus) (unreachable int) {
+	fmt.Fprintln(tw, "HOST\tSTATUS\tCLUSTERD\tUPTIME\tLOAD\tMEM")
+	for _, h := range hosts {
+		if !h.Reachable {
+			unreachable++
+			fmt.Fprintf(tw, "%s\tUnreachable\t-\t-\t-\t-\n", h.Name)
+			fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, shortError(h.Error))
+			continue
 		}
-		tw.Flush()
-	} else {
-		for _, h := range st.Hosts {
-			if !h.Reachable {
-				unreachable++
+		status := "Up"
+		for _, s := range h.Stores {
+			if !s.OK {
+				status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
 			}
 		}
+		if h.Error != "" {
+			fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, h.Error)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.0f%%\n", h.Name, status, h.Version, age(time.Duration(h.UptimeSeconds)*time.Second), h.Load1, h.MemUsedPercent)
 	}
+	return unreachable
+}
 
-	if tw := section("vms"); tw != nil {
-		fmt.Fprintln(tw, "VM\tHOST\tSTATUS")
-		for _, vm := range st.VMs {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", vm.Name, vm.Host, title(vm.State))
-		}
-		tw.Flush()
+func printVMs(tw *tabwriter.Writer, vms []api.VMStatus) {
+	fmt.Fprintln(tw, "VM\tHOST\tSTATUS")
+	for _, vm := range vms {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", vm.Name, vm.Host, title(vm.State))
 	}
+}
 
-	if tw := section("nodes"); tw != nil {
-		if !st.K3s.Reachable {
-			fmt.Fprintf(warn, "warning: k3s API unreachable: %s\n", shortError(st.K3s.Error))
-		}
-		fmt.Fprintln(tw, "NODE\tSTATUS\tROLES\tVERSION\tZONE")
-		for _, n := range st.K3s.Nodes {
-			status := "Ready"
-			if !n.Ready {
-				status = "NotReady"
-			}
-			if !n.Schedulable {
-				status += ",SchedulingDisabled"
-			}
-			roles := strings.Join(n.Roles, ",")
-			if roles == "" {
-				roles = "<none>"
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, status, roles, n.Version, n.Zone)
-		}
-		tw.Flush()
+func printNodes(tw *tabwriter.Writer, warn io.Writer, k api.K3sStatus) {
+	if !k.Reachable {
+		fmt.Fprintf(warn, "warning: k3s API unreachable: %s\n", shortError(k.Error))
 	}
+	fmt.Fprintln(tw, "NODE\tSTATUS\tROLES\tVERSION\tZONE")
+	for _, n := range k.Nodes {
+		status := "Ready"
+		if !n.Ready {
+			status = "NotReady"
+		}
+		if !n.Schedulable {
+			status += ",SchedulingDisabled"
+		}
+		roles := strings.Join(n.Roles, ",")
+		if roles == "" {
+			roles = "<none>"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, status, roles, n.Version, n.Zone)
+	}
+}
 
-	if tw := section("ceph"); tw != nil {
-		cp := st.Ceph
-		if cp.Error != "" {
-			fmt.Fprintf(warn, "warning: ceph: %s\n", cp.Error)
-		}
-		for _, chk := range cp.Checks {
-			fmt.Fprintf(warn, "warning: ceph %s\n", chk)
-		}
-		ago := "-"
-		if !cp.AsOf.IsZero() {
-			ago = age(now.Sub(cp.AsOf))
-		}
-		fmt.Fprintln(tw, "CEPH\tOSDS UP\tOSDS IN\tPGS CLEAN\tAGE")
-		fmt.Fprintf(tw, "%s\t%d/%d\t%d/%d\t%d/%d\t%s\n", cp.Health, cp.OSDsUp, cp.OSDsTotal, cp.OSDsIn, cp.OSDsTotal, cp.PGsActiveClean, cp.PGsTotal, ago)
-		tw.Flush()
+func printCeph(tw *tabwriter.Writer, warn io.Writer, cp api.CephStatus, now time.Time) {
+	if cp.Error != "" {
+		fmt.Fprintf(warn, "warning: ceph: %s\n", cp.Error)
 	}
+	for _, chk := range cp.Checks {
+		fmt.Fprintf(warn, "warning: ceph %s\n", chk)
+	}
+	ago := "-"
+	if !cp.AsOf.IsZero() {
+		ago = age(now.Sub(cp.AsOf))
+	}
+	fmt.Fprintln(tw, "CEPH\tOSDS UP\tOSDS IN\tPGS CLEAN\tRAW USED\tRAW SIZE\tFULL\tAGE")
+	fmt.Fprintf(tw, "%s\t%d/%d\t%d/%d\t%d/%d\t%s\t%s\t%s\t%s\n", cp.Health, cp.OSDsUp, cp.OSDsTotal, cp.OSDsIn, cp.OSDsTotal,
+		cp.PGsActiveClean, cp.PGsTotal, bytesHuman(cp.BytesUsed), bytesHuman(cp.BytesTotal), pct(percentOf(cp.BytesUsed, cp.BytesTotal)), ago)
+}
 
-	if tw := section("vips"); tw != nil {
-		fmt.Fprintln(tw, "VIP\tADDRESS\tOWNER")
-		for _, v := range st.VIPs {
-			owner := strings.Join(v.Owners, ",")
-			switch {
-			case len(v.Owners) > 1:
-				fmt.Fprintf(warn, "warning: VIP %s is on %d hosts (split brain)\n", v.Name, len(v.Owners))
-			case len(v.Owners) == 0 && unreachable > 0:
-				owner = "<unknown>" // it may be on a host we can't ask
-			case len(v.Owners) == 0:
-				owner = "<none>"
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", v.Name, v.Address, owner)
+func printVIPs(tw *tabwriter.Writer, warn io.Writer, vips []api.VIPStatus, someUnreachable bool) {
+	fmt.Fprintln(tw, "VIP\tADDRESS\tOWNER")
+	for _, v := range vips {
+		owner := strings.Join(v.Owners, ",")
+		switch {
+		case len(v.Owners) > 1:
+			fmt.Fprintf(warn, "warning: VIP %s is on %d hosts (split brain)\n", v.Name, len(v.Owners))
+		case len(v.Owners) == 0 && someUnreachable:
+			owner = "<unknown>" // it may be on a host we can't ask
+		case len(v.Owners) == 0:
+			owner = "<none>"
 		}
-		tw.Flush()
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", v.Name, v.Address, owner)
 	}
+}
+
+func printDisks(tw *tabwriter.Writer, w, warn io.Writer, d api.DisksStatus) {
+	for _, e := range d.Errors {
+		fmt.Fprintf(warn, "warning: disks: %s\n", e)
+	}
+	fmt.Fprintln(tw, "DISK\tHOST\tROLE\tTYPE\tSIZE\tUSED\tFULL\tWEAR\tTEMP\tSMART")
+	for _, k := range d.Disks {
+		wear := "-"
+		if k.WearPercent != nil {
+			wear = pct(*k.WearPercent)
+			if *k.WearPercent >= 80 {
+				fmt.Fprintf(warn, "warning: %s %s is %s worn\n", k.Host, k.Device, wear)
+			}
+		}
+		smart := "OK"
+		if !k.Healthy {
+			smart = "FAILING"
+			fmt.Fprintf(warn, "warning: %s %s fails its SMART check\n", k.Host, k.Device)
+		}
+		role := k.Role
+		if role == "" {
+			role = "<none>"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.0fC\t%s\n", k.Device, k.Host, role, k.Type,
+			bytesHuman(k.SizeBytes), bytesHuman(k.UsedBytes), pct(k.UsedPercent), wear, k.TemperatureC, smart)
+	}
+	tw.Flush()
+	fmt.Fprintln(w)
+	fmt.Fprintln(tw, "FILESYSTEM\tHOST\tDEVICE\tSIZE\tUSED\tFULL")
+	for _, f := range d.Filesystems {
+		if f.UsedPercent >= 85 {
+			fmt.Fprintf(warn, "warning: %s %s is %s full\n", f.Host, f.Mountpoint, pct(f.UsedPercent))
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", f.Mountpoint, f.Host, f.Device, bytesHuman(f.SizeBytes), bytesHuman(f.UsedBytes), pct(f.UsedPercent))
+	}
+}
+
+func printS3(tw *tabwriter.Writer, w, warn io.Writer, s api.S3Status, now time.Time) {
+	for _, e := range s.Errors {
+		fmt.Fprintf(warn, "warning: s3: %s\n", e)
+	}
+	up := 0
+	for _, g := range s.Gateways {
+		if g.Up {
+			up++
+		} else {
+			fmt.Fprintf(warn, "warning: s3 gateway on %s is down\n", g.Host)
+		}
+	}
+	cert := "-"
+	if s.CertExpires != nil {
+		cert = age(s.CertExpires.Sub(now))
+		if s.CertExpires.Sub(now) < 14*24*time.Hour {
+			fmt.Fprintf(warn, "warning: the S3 certificate expires in %s\n", cert)
+		}
+	}
+	endpoint := strings.TrimPrefix(s.Endpoint, "https://")
+	fmt.Fprintln(tw, "S3\tGATEWAYS\tUSERS\tBUCKETS\tOBJECTS\tSTORED\tROOM\tFULL\tCERT")
+	fmt.Fprintf(tw, "%s\t%d/%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n", endpoint, up, len(s.Gateways), s.Users, len(s.Buckets), s.Objects,
+		bytesHuman(s.SizeBytes), bytesHuman(s.Pool.MaxAvailBytes), pct(s.Pool.UsedPercent), cert)
+	if len(s.Buckets) == 0 {
+		return
+	}
+	tw.Flush()
+	fmt.Fprintln(w)
+	fmt.Fprintln(tw, "BUCKET\tOWNER\tOBJECTS\tSIZE\tQUOTA\tFULL")
+	for _, b := range s.Buckets {
+		quota, full := "-", "-"
+		if b.QuotaBytes > 0 {
+			quota = bytesHuman(b.QuotaBytes)
+			p := percentOf(b.SizeBytes, b.QuotaBytes)
+			full = pct(p)
+			if p >= 90 {
+				fmt.Fprintf(warn, "warning: bucket %s is %s of its quota\n", b.Name, full)
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", b.Name, b.Owner, b.Objects, bytesHuman(b.SizeBytes), quota, full)
+	}
+}
+
+// bytesHuman formats like df -H: decimal units, one decimal below 10.
+func bytesHuman(b int64) string {
+	if b < 1000 {
+		return fmt.Sprintf("%dB", b)
+	}
+	v := float64(b)
+	for _, u := range []string{"K", "M", "G", "T", "P"} {
+		v /= 1000
+		if v < 1000 || u == "P" {
+			if v < 10 {
+				return fmt.Sprintf("%.1f%s", v, u)
+			}
+			return fmt.Sprintf("%.0f%s", v, u)
+		}
+	}
+	return ""
+}
+
+func percentOf(part, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return 100 * float64(part) / float64(total)
+}
+
+func pct(p float64) string {
+	if p > 0 && p < 1 {
+		return fmt.Sprintf("%.1f%%", p)
+	}
+	return fmt.Sprintf("%.0f%%", p)
 }
 
 func title(s string) string {

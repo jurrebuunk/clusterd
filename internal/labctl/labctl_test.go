@@ -222,8 +222,9 @@ func TestShortErrorAndTitle(t *testing.T) {
 	}
 }
 
-func TestStatusOutput(t *testing.T) {
-	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+func statusFixture(now time.Time) api.Status {
+	wear := 47.0
+	exp := now.Add(80 * 24 * time.Hour)
 	st := api.Status{
 		Hosts: []api.HostStatus{
 			{Name: "hv01", Reachable: true, Version: "1.0.0", UptimeSeconds: 3 * 86400, Load1: 0.5, MemUsedPercent: 31.6,
@@ -233,12 +234,29 @@ func TestStatusOutput(t *testing.T) {
 		VMs: []api.VMStatus{{Name: "w1", Host: "hv01", State: "running"}},
 		K3s: api.K3sStatus{Reachable: true, Nodes: []api.K3sNode{{Name: "w1", Ready: true, Roles: []string{}, Version: "v1", Zone: "hv01"}}},
 		Ceph: api.CephStatus{Health: "HEALTH_WARN", Checks: []string{"HEALTH_WARN SLOW_OPS: 2 slow ops"}, OSDsTotal: 3, OSDsUp: 3, OSDsIn: 3,
-			PGsTotal: 10, PGsActiveClean: 10, AsOf: now.Add(-4 * time.Second)},
+			PGsTotal: 10, PGsActiveClean: 10, BytesTotal: 3e12, BytesUsed: 36e9, AsOf: now.Add(-4 * time.Second)},
 		VIPs: []api.VIPStatus{{Name: "api", Address: "10.0.0.20", Owners: []string{"hv01"}}, {Name: "mon", Address: "10.0.0.10", Owners: []string{}}},
+		Disks: api.DisksStatus{
+			Disks: []api.Disk{
+				{Host: "hv01", Device: "nvme0", Type: "nvme", Role: "system", SizeBytes: 256e9, UsedBytes: 50e9, UsedPercent: 19.6, WearPercent: &wear, TemperatureC: 41, Healthy: true},
+				{Host: "hv01", Device: "sda", Type: "hdd", Role: "osd.0", SizeBytes: 1000204886016, UsedBytes: 12e9, UsedPercent: 1.3, TemperatureC: 33, Healthy: true},
+			},
+			Filesystems: []api.Filesystem{{Host: "hv01", Mountpoint: "/", Device: "/dev/nvme0n1p2", SizeBytes: 200e9, UsedBytes: 50e9, UsedPercent: 26.3},
+				{Host: "vm1", Mountpoint: "/var/lib", Device: "/dev/vda", SizeBytes: 60e9, UsedBytes: 55e9, UsedPercent: 92}},
+		},
+		S3: api.S3Status{Endpoint: "https://s3.test", Users: 2, Objects: 50, SizeBytes: 3e9, CertExpires: &exp,
+			Gateways: []api.S3Gateway{{Host: "hv01", Up: true}, {Host: "hv02", Up: true}},
+			Buckets:  []api.S3Bucket{{Name: "backups", Owner: "app", Objects: 40, SizeBytes: 2e9, QuotaBytes: 4e9}, {Name: "media", Owner: "jurre", Objects: 10, SizeBytes: 1e9}},
+			Pool:     api.S3Pool{StoredBytes: 3e9, MaxAvailBytes: 297e9, UsedPercent: 1}},
 	}
 	st.K3s.Nodes[0].Schedulable = false
+	return st
+}
+
+func TestStatusOutput(t *testing.T) {
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	var out, warn bytes.Buffer
-	printStatus(&out, &warn, st, "", now)
+	printStatus(&out, &warn, statusFixture(now), now)
 	want := `HOST  STATUS       CLUSTERD  UPTIME  LOAD  MEM
 hv01  Up,LogsDown  1.0.0     3d      0.50  32%
 hv02  Unreachable  -         -       -     -
@@ -249,25 +267,43 @@ w1  hv01  Running
 NODE  STATUS                    ROLES   VERSION  ZONE
 w1    Ready,SchedulingDisabled  <none>  v1       hv01
 
-CEPH         OSDS UP  OSDS IN  PGS CLEAN  AGE
-HEALTH_WARN  3/3      3/3      10/10      4s
+CEPH         OSDS UP  OSDS IN  PGS CLEAN  RAW USED  RAW SIZE  FULL  AGE
+HEALTH_WARN  3/3      3/3      10/10      36G       3.0T      1%    4s
 
 VIP  ADDRESS    OWNER
 api  10.0.0.20  hv01
 mon  10.0.0.10  <unknown>
+
+DISK   HOST  ROLE    TYPE  SIZE  USED  FULL  WEAR  TEMP  SMART
+nvme0  hv01  system  nvme  256G  50G   20%   47%   41C   OK
+sda    hv01  osd.0   hdd   1.0T  12G   1%    -     33C   OK
+
+FILESYSTEM  HOST  DEVICE          SIZE  USED  FULL
+/           hv01  /dev/nvme0n1p2  200G  50G   26%
+/var/lib    vm1   /dev/vda        60G   55G   92%
+
+S3       GATEWAYS  USERS  BUCKETS  OBJECTS  STORED  ROOM  FULL  CERT
+s3.test  2/2       2      2        50       3.0G    297G  1%    80d
+
+BUCKET   OWNER  OBJECTS  SIZE  QUOTA  FULL
+backups  app    40       2.0G  4.0G   50%
+media    jurre  10       1.0G  -      -
 `
 	if got := out.String(); got != want {
 		t.Errorf("status output:\n%s\nwant:\n%s", got, want)
 	}
-	for _, w := range []string{"warning: hv02: connection refused", "warning: ceph HEALTH_WARN SLOW_OPS"} {
+	for _, w := range []string{"warning: hv02: connection refused", "warning: ceph HEALTH_WARN SLOW_OPS", "warning: vm1 /var/lib is 92% full"} {
 		if !strings.Contains(warn.String(), w) {
 			t.Errorf("missing %q in warnings:\n%s", w, warn.String())
 		}
 	}
-	out.Reset()
-	printStatus(&out, &warn, st, "vips", now)
-	if !strings.HasPrefix(out.String(), "VIP") || strings.Contains(out.String(), "HOST") {
-		t.Errorf("one section: %q", out.String())
+}
+
+func TestBytesHuman(t *testing.T) {
+	for b, want := range map[int64]string{999: "999B", 1500: "1.5K", 256060514304: "256G", 1000204886016: "1.0T", 36e9: "36G"} {
+		if got := bytesHuman(b); got != want {
+			t.Errorf("bytesHuman(%d) = %s, want %s", b, got, want)
+		}
 	}
 }
 

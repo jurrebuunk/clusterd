@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: clusterd
-  version: 1.0.0
+  version: 1.1.0
   summary: Platform API of the homelab
   description: |
     One stateless instance per hypervisor behind a highly available address.
@@ -53,7 +53,7 @@ paths:
 
   /v1/status:
     get:
-      summary: Hosts, VMs, k3s nodes, Ceph health and VIP owners
+      summary: Everything at once; each part is also its own /v1/status/<part>
       description: |
         Asks every peer's /v1/node with the caller's own token. Parts that fail
         are reported in place (unreachable host, k3s error, ceph error); the
@@ -65,6 +65,94 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/hosts:
+    get:
+      summary: "Hypervisors: reachability, version, uptime, load, memory, stores"
+      x-scope: read
+      description: Asks every host (/v1/node) with the caller's token.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostsStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/vms:
+    get:
+      summary: VMs from the inventory and their state
+      x-scope: read
+      description: Asks every host (/v1/node) with the caller's token.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMsStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/k3s:
+    get:
+      summary: Kubernetes nodes
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/K3sStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/ceph:
+    get:
+      summary: Ceph health and raw capacity (refreshed every 10 s)
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CephStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/vips:
+    get:
+      summary: Which host holds each floating address
+      x-scope: read
+      description: Asks every host (/v1/node) with the caller's token.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VIPsStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/disks:
+    get:
+      summary: Physical disks (size, how full, wear, SMART), filesystems and OSDs
+      x-scope: read
+      description: From the SMART and node metrics (about 30 s old) and Ceph (about 60 s).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DisksStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/status/s3:
+    get:
+      summary: "Object store: gateways, users, buckets with usage and quotas, pool room, certificate"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Status" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/metrics/query:
@@ -265,63 +353,163 @@ components:
         site: { type: string }
         generated_at: { type: string, format: date-time }
         served_by: { type: string }
-        hosts:
+        hosts: { type: array, items: { $ref: "#/components/schemas/HostStatus" } }
+        vms: { type: array, items: { $ref: "#/components/schemas/VMStatus" } }
+        k3s: { $ref: "#/components/schemas/K3sStatus" }
+        ceph: { $ref: "#/components/schemas/CephStatus" }
+        vips: { type: array, items: { $ref: "#/components/schemas/VIPStatus" } }
+        disks: { $ref: "#/components/schemas/DisksStatus" }
+        s3: { $ref: "#/components/schemas/S3Status" }
+    HostsStatus:
+      type: object
+      properties:
+        hosts: { type: array, items: { $ref: "#/components/schemas/HostStatus" } }
+    VMsStatus:
+      type: object
+      properties:
+        vms: { type: array, items: { $ref: "#/components/schemas/VMStatus" } }
+    VIPsStatus:
+      type: object
+      properties:
+        vips: { type: array, items: { $ref: "#/components/schemas/VIPStatus" } }
+    HostStatus:
+      type: object
+      properties:
+        name: { type: string }
+        reachable: { type: boolean }
+        version: { type: string }
+        uptime_seconds: { type: integer }
+        load1: { type: number }
+        mem_used_percent: { type: number }
+        stores: { type: array, items: { $ref: "#/components/schemas/StoreHealth" } }
+        error: { type: string }
+    VMStatus:
+      type: object
+      properties:
+        name: { type: string }
+        host: { type: string }
+        state: { type: string, enum: [running, starting, stopped, failed, missing, disabled, unknown] }
+    K3sStatus:
+      type: object
+      properties:
+        reachable: { type: boolean }
+        error: { type: string }
+        nodes:
           type: array
           items:
             type: object
             properties:
               name: { type: string }
-              reachable: { type: boolean }
+              ready: { type: boolean }
+              schedulable: { type: boolean }
+              roles: { type: array, items: { type: string } }
               version: { type: string }
-              uptime_seconds: { type: integer }
-              load1: { type: number }
-              mem_used_percent: { type: number }
-              stores: { type: array, items: { $ref: "#/components/schemas/StoreHealth" } }
-              error: { type: string }
-        vms:
+              zone: { type: string }
+    CephStatus:
+      type: object
+      properties:
+        health: { type: string }
+        checks: { type: array, items: { type: string } }
+        osds_total: { type: integer }
+        osds_up: { type: integer }
+        osds_in: { type: integer }
+        pgs_total: { type: integer }
+        pgs_active_clean: { type: integer }
+        bytes_total: { type: integer, description: Raw capacity of all OSDs }
+        bytes_used: { type: integer }
+        bytes_avail: { type: integer }
+        error: { type: string }
+        as_of: { type: string, format: date-time, description: "When Ceph was asked; refreshed every 10 s" }
+    VIPStatus:
+      type: object
+      properties:
+        name: { type: string }
+        address: { type: string }
+        owners: { type: array, items: { type: string }, description: "More than one: split brain" }
+    DisksStatus:
+      type: object
+      properties:
+        disks:
           type: array
           items:
             type: object
             properties:
-              name: { type: string }
               host: { type: string }
-              state: { type: string, enum: [running, starting, stopped, failed, missing, disabled, unknown] }
-        k3s:
-          type: object
-          properties:
-            reachable: { type: boolean }
-            error: { type: string }
-            nodes:
-              type: array
-              items:
-                type: object
-                properties:
-                  name: { type: string }
-                  ready: { type: boolean }
-                  schedulable: { type: boolean }
-                  roles: { type: array, items: { type: string } }
-                  version: { type: string }
-                  zone: { type: string }
-        ceph:
-          type: object
-          properties:
-            health: { type: string }
-            checks: { type: array, items: { type: string } }
-            osds_total: { type: integer }
-            osds_up: { type: integer }
-            osds_in: { type: integer }
-            pgs_total: { type: integer }
-            pgs_active_clean: { type: integer }
-            error: { type: string }
-            as_of: { type: string, format: date-time, description: "When Ceph was asked; refreshed every 10 s" }
-        vips:
+              device: { type: string, description: "nvme0, sda" }
+              type: { type: string, enum: [nvme, ssd, hdd] }
+              model: { type: string }
+              serial: { type: string }
+              role: { type: string, description: '"system", "data", "osd.N" or empty when unknown' }
+              size_bytes: { type: integer }
+              used_bytes: { type: integer, description: "The OSD's usage, or the filesystems on the disk's partitions" }
+              used_percent: { type: number }
+              wear_percent: { type: number, description: NVMe endurance used; absent for HDDs }
+              temperature_c: { type: number }
+              healthy: { type: boolean, description: SMART overall assessment }
+              power_on_hours: { type: integer }
+              media_errors: { type: integer }
+        filesystems:
+          type: array
+          items:
+            type: object
+            properties:
+              host: { type: string, description: Host or VM }
+              mountpoint: { type: string }
+              device: { type: string }
+              fstype: { type: string }
+              size_bytes: { type: integer }
+              used_bytes: { type: integer }
+              used_percent: { type: number, description: "Like df: of the space usable without root's reserve" }
+        osds:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              host: { type: string }
+              device: { type: string }
+              device_class: { type: string }
+              size_bytes: { type: integer }
+              used_bytes: { type: integer }
+              used_percent: { type: number }
+              up: { type: boolean }
+              in: { type: boolean }
+        errors: { type: array, items: { type: string } }
+    S3Status:
+      type: object
+      properties:
+        endpoint: { type: string }
+        gateways:
+          type: array
+          items:
+            type: object
+            properties:
+              host: { type: string }
+              up: { type: boolean }
+        users: { type: integer, description: Not counting the API's own read-only user }
+        buckets:
           type: array
           items:
             type: object
             properties:
               name: { type: string }
-              address: { type: string }
-              owners: { type: array, items: { type: string }, description: "More than one: split brain" }
+              owner: { type: string }
+              objects: { type: integer }
+              size_bytes: { type: integer }
+              quota_bytes: { type: integer, description: 0 means no quota }
+              quota_objects: { type: integer, description: 0 means no quota }
+              created: { type: string, format: date-time }
+        objects: { type: integer }
+        size_bytes: { type: integer, description: What the buckets hold (one copy) }
+        pool:
+          type: object
+          properties:
+            name: { type: string }
+            stored_bytes: { type: integer }
+            max_avail_bytes: { type: integer, description: Room left for data, after replication }
+            used_percent: { type: number }
+        cert_expires: { type: string, format: date-time }
+        errors: { type: array, items: { type: string } }
     RestartPlan:
       type: object
       properties:

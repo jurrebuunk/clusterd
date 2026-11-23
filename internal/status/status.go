@@ -39,6 +39,10 @@ type Collector struct {
 	cephMu       sync.Mutex
 	cephVal      api.CephStatus
 	cephInflight chan struct{}
+
+	osdMu       sync.Mutex
+	osdVal      osdInfo
+	osdInflight chan struct{}
 }
 
 // CephRefresh is how often the background loop asks Ceph.
@@ -69,34 +73,41 @@ func New(cfg *config.Config, kc *kube.Client, log *slog.Logger) *Collector {
 	}
 }
 
-// Status gathers the whole site. token is the caller's own bearer token: it
-// is passed on to the peers' /v1/node, so a peer only answers callers it
-// would answer itself and no extra credential is needed between instances.
-func (c *Collector) Status(ctx context.Context, token string) api.Status {
-	st := api.Status{Site: c.cfg.Site, ServedBy: c.cfg.Host, GeneratedAt: c.now().UTC()}
-
+// nodeFacts asks every host for its /v1/node (this one locally), in parallel.
+// token is the caller's own bearer token: peers only answer callers they
+// would answer themselves, and no extra credential is needed between hosts.
+func (c *Collector) nodeFacts(ctx context.Context, token string) (map[string]*api.Node, map[string]error) {
 	var wg sync.WaitGroup
-	nodes := make([]*api.Node, len(c.cfg.Hosts))
-	errs := make([]error, len(c.cfg.Hosts))
-	for i, h := range c.cfg.Hosts {
+	var mu sync.Mutex
+	nodes, errs := map[string]*api.Node{}, map[string]error{}
+	for _, h := range c.cfg.Hosts {
 		wg.Go(func() {
+			var n *api.Node
+			var err error
 			if h.Name == c.cfg.Host {
-				n := c.Node(ctx)
-				nodes[i] = &n
-				return
+				local := c.Node(ctx)
+				n = &local
+			} else {
+				n, err = c.peerNode(ctx, h, token)
 			}
-			nodes[i], errs[i] = c.peerNode(ctx, h, token)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs[h.Name] = err
+			} else {
+				nodes[h.Name] = n
+			}
 		})
 	}
-	wg.Go(func() { st.K3s = c.k3s(ctx) })
-	wg.Go(func() { st.Ceph = c.cephCached(ctx) })
 	wg.Wait()
+	return nodes, errs
+}
 
-	byHost := map[string]*api.Node{}
-	for i, h := range c.cfg.Hosts {
+func (c *Collector) hostStatuses(nodes map[string]*api.Node, errs map[string]error) []api.HostStatus {
+	out := []api.HostStatus{}
+	for _, h := range c.cfg.Hosts {
 		hs := api.HostStatus{Name: h.Name}
-		if n := nodes[i]; n != nil {
-			byHost[h.Name] = n
+		if n := nodes[h.Name]; n != nil {
 			hs.Reachable = true
 			hs.Version = n.Version
 			hs.UptimeSeconds = n.UptimeSeconds
@@ -106,13 +117,53 @@ func (c *Collector) Status(ctx context.Context, token string) api.Status {
 			}
 			hs.Stores = n.Stores
 			hs.Error = strings.Join(n.Errors, "; ")
-		} else {
-			hs.Error = errs[i].Error()
+		} else if err := errs[h.Name]; err != nil {
+			hs.Error = err.Error()
 		}
-		st.Hosts = append(st.Hosts, hs)
+		out = append(out, hs)
 	}
-	st.VMs = vmStates(c.cfg.VMs, byHost)
-	st.VIPs = vipOwners(c.cfg.VIPs, c.cfg.Hosts, byHost)
+	return out
+}
+
+// Hosts is GET /v1/status/hosts.
+func (c *Collector) Hosts(ctx context.Context, token string) api.HostsStatus {
+	nodes, errs := c.nodeFacts(ctx, token)
+	return api.HostsStatus{Hosts: c.hostStatuses(nodes, errs)}
+}
+
+// VMs is GET /v1/status/vms.
+func (c *Collector) VMs(ctx context.Context, token string) api.VMsStatus {
+	nodes, _ := c.nodeFacts(ctx, token)
+	return api.VMsStatus{VMs: vmStates(c.cfg.VMs, nodes)}
+}
+
+// VIPs is GET /v1/status/vips.
+func (c *Collector) VIPs(ctx context.Context, token string) api.VIPsStatus {
+	nodes, _ := c.nodeFacts(ctx, token)
+	return api.VIPsStatus{VIPs: vipOwners(c.cfg.VIPs, c.cfg.Hosts, nodes)}
+}
+
+// K3s is GET /v1/status/k3s.
+func (c *Collector) K3s(ctx context.Context) api.K3sStatus { return c.k3s(ctx) }
+
+// Ceph is GET /v1/status/ceph.
+func (c *Collector) Ceph(ctx context.Context) api.CephStatus { return c.cephCached(ctx) }
+
+// Status gathers everything; every part runs in parallel.
+func (c *Collector) Status(ctx context.Context, token string) api.Status {
+	st := api.Status{Site: c.cfg.Site, ServedBy: c.cfg.Host, GeneratedAt: c.now().UTC()}
+	var nodes map[string]*api.Node
+	var errs map[string]error
+	var wg sync.WaitGroup
+	wg.Go(func() { nodes, errs = c.nodeFacts(ctx, token) })
+	wg.Go(func() { st.K3s = c.k3s(ctx) })
+	wg.Go(func() { st.Ceph = c.cephCached(ctx) })
+	wg.Go(func() { st.Disks = c.Disks(ctx) })
+	wg.Go(func() { st.S3 = c.S3(ctx) })
+	wg.Wait()
+	st.Hosts = c.hostStatuses(nodes, errs)
+	st.VMs = vmStates(c.cfg.VMs, nodes)
+	st.VIPs = vipOwners(c.cfg.VIPs, c.cfg.Hosts, nodes)
 	return st
 }
 
@@ -228,7 +279,10 @@ type cephStatus struct {
 		NumInOSDs int `json:"num_in_osds"`
 	} `json:"osdmap"`
 	PGMap struct {
-		NumPGs     int `json:"num_pgs"`
+		BytesTotal int64 `json:"bytes_total"`
+		BytesUsed  int64 `json:"bytes_used"`
+		BytesAvail int64 `json:"bytes_avail"`
+		NumPGs     int   `json:"num_pgs"`
 		PGsByState []struct {
 			StateName string `json:"state_name"`
 			Count     int    `json:"count"`
@@ -313,12 +367,15 @@ func parseCeph(out []byte) api.CephStatus {
 		return api.CephStatus{Health: "unknown", Checks: []string{}, Error: "ceph output: " + err.Error()}
 	}
 	s := api.CephStatus{
-		Health:    cs.Health.Status,
-		Checks:    []string{},
-		OSDsTotal: cs.OSDMap.NumOSDs,
-		OSDsUp:    cs.OSDMap.NumUpOSDs,
-		OSDsIn:    cs.OSDMap.NumInOSDs,
-		PGsTotal:  cs.PGMap.NumPGs,
+		Health:     cs.Health.Status,
+		Checks:     []string{},
+		OSDsTotal:  cs.OSDMap.NumOSDs,
+		OSDsUp:     cs.OSDMap.NumUpOSDs,
+		OSDsIn:     cs.OSDMap.NumInOSDs,
+		PGsTotal:   cs.PGMap.NumPGs,
+		BytesTotal: cs.PGMap.BytesTotal,
+		BytesUsed:  cs.PGMap.BytesUsed,
+		BytesAvail: cs.PGMap.BytesAvail,
 	}
 	for name, chk := range cs.Health.Checks {
 		s.Checks = append(s.Checks, fmt.Sprintf("%s %s: %s", chk.Severity, name, chk.Summary.Message))

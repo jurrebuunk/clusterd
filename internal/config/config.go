@@ -31,6 +31,8 @@ type Host struct {
 	// Metrics and Logs are the host's VictoriaMetrics and VictoriaLogs.
 	Metrics string `toml:"metrics"`
 	Logs    string `toml:"logs"`
+	// RGW is the host's own Ceph object gateway, for the S3 admin API (optional).
+	RGW string `toml:"rgw"`
 }
 
 // VIP is a floating address whose owner /v1/status reports.
@@ -75,6 +77,16 @@ type Config struct {
 		Keyring string `toml:"keyring"`
 	} `toml:"ceph"`
 
+	S3 struct {
+		// Endpoint is the public S3 address, shown in the status.
+		Endpoint string `toml:"endpoint"`
+		// Credentials is a JSON file {"access_key", "secret_key"} of an RGW user
+		// with read caps on buckets, users, usage and metadata.
+		Credentials string `toml:"credentials"`
+		// DataPool is the Ceph pool with the object data.
+		DataPool string `toml:"data_pool"`
+	} `toml:"s3"`
+
 	Limits struct {
 		RequestTimeout Duration `toml:"request_timeout"`
 		PeerTimeout    Duration `toml:"peer_timeout"`
@@ -104,6 +116,9 @@ func (c *Config) defaults() {
 	}
 	if c.Ceph.Command == "" {
 		c.Ceph.Command = "ceph"
+	}
+	if c.S3.DataPool == "" {
+		c.S3.DataPool = "default.rgw.buckets.data"
 	}
 	l := &c.Limits
 	if l.RequestTimeout.Duration == 0 {
@@ -147,7 +162,11 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("host %q listed twice", h.Name))
 		}
 		seen[h.Name] = true
-		for field, v := range map[string]string{"api": h.API, "metrics": h.Metrics, "logs": h.Logs} {
+		urls := map[string]string{"api": h.API, "metrics": h.Metrics, "logs": h.Logs}
+		if h.RGW != "" {
+			urls["rgw"] = h.RGW
+		}
+		for field, v := range urls {
 			if u, err := url.Parse(v); err != nil || u.Scheme == "" || u.Host == "" {
 				errs = append(errs, fmt.Errorf("host %q: %s must be an absolute URL", h.Name, field))
 			}

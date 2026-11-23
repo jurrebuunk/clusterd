@@ -11,7 +11,8 @@ let
   credentials =
     { tokens = cfg.tokensFile; }
     // lib.optionalAttrs (cfg.kubeconfigFile != null) { kubeconfig = cfg.kubeconfigFile; }
-    // lib.optionalAttrs (cfg.ceph.keyringFile != null) { ceph-keyring = cfg.ceph.keyringFile; };
+    // lib.optionalAttrs (cfg.ceph.keyringFile != null) { ceph-keyring = cfg.ceph.keyringFile; }
+    // lib.optionalAttrs (cfg.s3.credentialsFile != null) { s3-admin = cfg.s3.credentialsFile; };
 
   settings = lib.recursiveUpdate cfg.settings (
     {
@@ -26,6 +27,9 @@ let
         id = cfg.ceph.id;
         keyring = "${credDir}/ceph-keyring";
       };
+    }
+    // lib.optionalAttrs (cfg.s3.credentialsFile != null) {
+      s3.credentials = "${credDir}/s3-admin";
     }
   );
 in
@@ -45,8 +49,9 @@ in
       default = { };
       description = ''
         clusterd's config.toml (see internal/config/config.go): site, host,
-        listen, metrics_listen, server_name, tls, hosts, vips, vms, limits.
-        tokens_file, kubernetes and ceph are set from the options below.
+        listen, metrics_listen, server_name, tls, hosts (with an optional rgw
+        URL each), vips, vms, s3.endpoint, s3.data_pool, limits. tokens_file,
+        kubernetes, ceph and s3.credentials are set from the options below.
       '';
     };
 
@@ -78,6 +83,16 @@ in
         description = "Ceph client name, without the client. prefix.";
       };
       package = lib.mkPackageOption pkgs "ceph" { };
+    };
+
+    s3.credentialsFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        JSON {"access_key", "secret_key"} of an RGW user with the caps
+        buckets=read;users=read;usage=read;metadata=read, for bucket usage in
+        /v1/status/s3. Set settings.s3.endpoint and each host's rgw URL too.
+      '';
     };
 
     manageUnitPrefixes = lib.mkOption {

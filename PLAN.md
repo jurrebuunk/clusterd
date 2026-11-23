@@ -299,71 +299,72 @@ so `scripts/vm.sh` and `scripts/k3s-roll.sh` can be deleted.
 
 **VMs and nodes**
 
-- [ ] `POST /v1/actions/vms/{name}/stop` (operator): the restart's checks,
+- [x] `POST /v1/actions/vms/{name}/stop` (operator): the restart's checks,
       the lock, cordon and drain, then stop `microvm@<name>`. The node stays
       cordoned; a stopped VM starts again at host boot (Nix decides what
       exists).
-- [ ] `POST /v1/actions/vms/{name}/start` (operator): refuses when it runs;
+- [x] `POST /v1/actions/vms/{name}/start` (operator): refuses when it runs;
       start, wait Ready, uncordon.
-- [ ] `POST /v1/actions/nodes/{name}/cordon` and `/uncordon` (operator), so a
+- [x] `POST /v1/actions/nodes/{name}/cordon` and `/uncordon` (operator), so a
       node left cordoned after a failed restart no longer needs `kubectl`.
-- [ ] `labctl vm stop|start <vm>`, `labctl node cordon|uncordon <node>`, and
+- [x] `labctl vm stop|start <vm>`, `labctl node cordon|uncordon <node>`, and
       `labctl vm roll [vm…]`: restart every enabled VM (or the given ones),
       agents first, one at a time, stopping at the first failure; replaces
       `scripts/k3s-roll.sh`.
 
 **Host maintenance**
 
-- [ ] `POST /v1/actions/hosts/{name}/maintenance` (manage, runs on that
+- [x] `POST /v1/actions/hosts/{name}/maintenance` (manage, runs on that
       host): checks (no other host in maintenance, every node elsewhere
       Ready, etcd keeps quorum, `ceph osd ok-to-stop` for the host's OSDs),
       then the lock, drain and stop the host's VMs (agents first) and
       `ceph osd set-group noout <host>`. `?reboot=1` reboots the host after
       the answer (polkit allows the `clusterd` user only that).
-- [ ] `POST /v1/actions/hosts/{name}/resume` (manage): start the VMs that
+- [x] `POST /v1/actions/hosts/{name}/resume` (manage): start the VMs that
       don't run, wait Ready, uncordon, `ceph osd unset-group noout <host>`,
       wait until all PGs are clean.
-- [ ] Maintenance is Ceph's per-host `noout` flag, so it survives the reboot
+- [x] Maintenance is Ceph's per-host `noout` flag, so it survives the reboot
       and `labctl status host` shows `Up,Maintenance` without extra state.
 - [ ] The Ceph key may run `osd set-group` and `osd unset-group`, nothing
       else that writes.
-- [ ] `labctl host maintenance <host> [--reboot]`, `labctl host resume <host>`.
+- [x] `labctl host maintenance <host> [--reboot]`, `labctl host resume <host>`.
 
 **Health**
 
-- [ ] `GET /v1/checks`: one verdict over everything (hosts, failed units, VMs,
+- [x] `GET /v1/checks`: one verdict over everything (hosts, failed units, VMs,
       nodes, Ceph, VIPs, disks, S3, tunnel, probes and targets, clock),
       each area `ok`, `warn` or `fail` with the reason.
-- [ ] `labctl health`: the checks as a table; exit code 5 when anything isn't
+- [x] `labctl health`: the checks as a table; exit code 5 when anything isn't
       `ok`, so a timer can use it as the heartbeat.
 
 **Smaller**
 
-- [ ] `labctl logs --unit 'ceph-osd*'` (prefix) and unit names with dots.
-- [ ] Completion for the new commands.
+- [x] `labctl logs --unit 'ceph-osd*'` (prefix) and unit names with dots.
+- [x] Completion for the new commands.
 
 **Cluster repo and docs**
 
-- [ ] Pin `v1.1.0`; polkit reboot rule on; the Ceph cap.
-- [ ] Delete `scripts/vm.sh` and `scripts/k3s-roll.sh`; the handbook uses
+- [x] Pin `v1.1.0`; polkit reboot rule on.
+- [ ] The Ceph cap (`osd set-group`/`unset-group`); until then host
+      maintenance stops at the `noout` step.
+- [x] Delete `scripts/vm.sh` and `scripts/k3s-roll.sh`; the handbook uses
       `labctl vm stop|start|roll`, `labctl node uncordon`,
       `labctl host maintenance|resume` and `labctl health`.
 
 **Done when**
 
-- [ ] A VM stopped and started again through `labctl`, with the node drained
+- [x] A VM stopped and started again through `labctl`, with the node drained
       before and Ready after.
-- [ ] `labctl vm roll` over all five VMs without API errors.
-- [ ] A host taken into maintenance (VMs stopped, `noout` on that host),
+- [x] `labctl vm roll` over all five VMs without API errors.
+- [ ] *(not yet tested live)* A host taken into maintenance (VMs stopped, `noout` on that host),
       rebooted, and resumed to `HEALTH_OK` with all nodes Ready, only
       through `labctl`.
-- [ ] `labctl health` exits 0 on a healthy site and 5 with a broken part.
-- [ ] `v1.1.0` released and deployed; the scripts are gone.
+- [x] `labctl health` exits 0 on a healthy site and 5 with a broken part.
+- [x] `v1.1.0` released and deployed; the scripts are gone.
 
 ### After v1
 
-Not part of v1, in rough order: more actions (VM stop/start, host
-maintenance mode), OIDC through Keycloak instead of hand-made tokens,
+Not part of v1, in rough order: OIDC through Keycloak instead of hand-made tokens,
 `lab-console` on top of the `operator` scope, more sites as `labctl`
 contexts.
 

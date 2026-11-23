@@ -133,7 +133,16 @@ func (s *Server) routes() []route {
 		{"GET /v1/logs/hits", "logs_hits", auth.ScopeRead, false, s.logsRoute("/select/logsql/hits")},
 		{"GET /v1/logs/streams", "logs_streams", auth.ScopeRead, false, s.logsRoute("/select/logsql/streams")},
 
-		{"POST /v1/actions/vms/{name}/restart", "vm_restart", auth.ScopeOperator, true, s.vmRestart},
+		{"GET /v1/checks", "checks", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.Checks(r.Context(), callerFrom(r.Context()).raw))
+		}},
+		{"POST /v1/actions/vms/{name}/restart", "vm_restart", auth.ScopeOperator, true, s.vmAction("restart")},
+		{"POST /v1/actions/vms/{name}/stop", "vm_stop", auth.ScopeOperator, true, s.vmAction("stop")},
+		{"POST /v1/actions/vms/{name}/start", "vm_start", auth.ScopeOperator, true, s.vmAction("start")},
+		{"POST /v1/actions/nodes/{name}/cordon", "node_cordon", auth.ScopeOperator, false, s.nodeCordon(true)},
+		{"POST /v1/actions/nodes/{name}/uncordon", "node_uncordon", auth.ScopeOperator, false, s.nodeCordon(false)},
+		{"POST /v1/actions/hosts/{name}/maintenance", "host_maintenance", auth.ScopeManage, true, s.hostAction("maintenance")},
+		{"POST /v1/actions/hosts/{name}/resume", "host_resume", auth.ScopeManage, true, s.hostAction("resume")},
 		// Anything else under actions still needs operator scope to learn it doesn't exist.
 		{"/v1/actions/", "actions", auth.ScopeOperator, false, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "no such action")

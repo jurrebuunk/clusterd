@@ -5,6 +5,7 @@ package actions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,28 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/config"
 	"github.com/jurrebuunk/clusterd/internal/kube"
 )
+
+// Ceph runs the ceph CLI with the configured key and decodes its JSON.
+func (e *Engine) ceph(ctx context.Context, out any, args ...string) error {
+	cc := e.Cfg.Ceph
+	if cc.Keyring == "" || cc.ID == "" {
+		return errors.New("ceph is not configured")
+	}
+	full := append([]string{"--id", cc.ID, "--keyring", cc.Keyring, "--connect-timeout", "10"}, args...)
+	if out != nil {
+		full = append(full, "--format", "json")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	b, err := e.Run(ctx, cc.Command, full...)
+	if err != nil {
+		return err
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(b, out)
+}
 
 // Kube is the part of the Kubernetes API actions use (a fake in tests).
 type Kube interface {
@@ -38,6 +61,7 @@ type Timing struct {
 	RestartTimeout time.Duration
 	BootTimeout    time.Duration
 	LockTTL        time.Duration // a crashed holder frees the lock after this
+	RecoverTimeout time.Duration // Ceph back to clean after a host resume
 	Total          time.Duration // hard limit for the whole action
 }
 
@@ -48,7 +72,8 @@ var DefaultTiming = Timing{
 	RestartTimeout: 6 * time.Minute,
 	BootTimeout:    10 * time.Minute,
 	LockTTL:        2 * time.Minute,
-	Total:          30 * time.Minute,
+	RecoverTimeout: 20 * time.Minute,
+	Total:          60 * time.Minute,
 }
 
 // Engine runs actions on this host.
@@ -109,7 +134,7 @@ func (e *Engine) now() time.Time {
 
 // start runs body in the background with its own deadline, independent of
 // the request, and handles events, audit and the lock.
-func (e *Engine) start(name, target string, c Caller, lk *lock, body func(ctx context.Context, emit func(string)) error) *Run {
+func (e *Engine) start(name, target string, c Caller, lk *lock, body func(ctx context.Context, emit func(string)) error, after ...func()) *Run {
 	r := &Run{events: make(chan api.ActionEvent, 256), done: make(chan struct{})}
 	log := e.Log.With("action", name, "target", target, "token", c.Token, "scope", c.Scope, "request_id", c.RequestID)
 	send := func(status, msg string) {
@@ -144,6 +169,11 @@ func (e *Engine) start(name, target string, c Caller, lk *lock, body func(ctx co
 		r.err = err
 		close(r.events)
 		close(r.done)
+		if err == nil {
+			for _, f := range after {
+				f()
+			}
+		}
 	}()
 	log.Info("audit", "event", "start")
 	return r

@@ -88,7 +88,9 @@ type HostStatus struct {
 	Load1          float64       `json:"load1"`
 	MemUsedPercent float64       `json:"mem_used_percent"`
 	Stores         []StoreHealth `json:"stores,omitempty"`
-	Error          string        `json:"error,omitempty"`
+	// Maintenance: the host's OSDs have Ceph's per-host noout flag.
+	Maintenance bool   `json:"maintenance"`
+	Error       string `json:"error,omitempty"`
 }
 
 // VM states in VMStatus.State.
@@ -275,3 +277,33 @@ type S3Pool struct {
 	MaxAvailBytes int64   `json:"max_avail_bytes"`
 	UsedPercent   float64 `json:"used_percent"`
 }
+
+// HostPlan is what host maintenance or resume would do (dry run).
+type HostPlan struct {
+	Host       string   `json:"host"`
+	VMs        []string `json:"vms"`
+	OSDs       []int    `json:"osds"`
+	Steps      []string `json:"steps"`
+	LockHolder string   `json:"lock_holder,omitempty"`
+}
+
+// Checks is GET /v1/checks: one verdict for the whole site.
+type Checks struct {
+	// Status is the worst of all checks: ok, warn or fail.
+	Status string  `json:"status"`
+	Checks []Check `json:"checks"`
+}
+
+// Check is one area of the site.
+type Check struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+// Check statuses, from good to bad.
+const (
+	CheckOK   = "ok"
+	CheckWarn = "warn"
+	CheckFail = "fail"
+)

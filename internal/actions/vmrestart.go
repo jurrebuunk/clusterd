@@ -114,15 +114,23 @@ func (e *Engine) PlanVMRestart(ctx context.Context, name string) (api.RestartPla
 	return plan, evict, nil
 }
 
+// localVM checks the VM exists and runs on this host.
+func (e *Engine) localVM(name string) (config.VM, error) {
+	vm, err := e.VM(name)
+	if err != nil {
+		return vm, err
+	}
+	if vm.Host != e.Cfg.Host {
+		return vm, fmt.Errorf("%s runs on %s, not on %s", name, vm.Host, e.Cfg.Host)
+	}
+	return vm, nil
+}
+
 // StartVMRestart checks, locks and starts the restart in the background.
 // Errors here (not found, precondition, busy) mean nothing happened.
 func (e *Engine) StartVMRestart(ctx context.Context, name string, c Caller) (*Run, error) {
-	vm, err := e.VM(name)
-	if err != nil {
+	if _, err := e.localVM(name); err != nil {
 		return nil, err
-	}
-	if vm.Host != e.Cfg.Host {
-		return nil, fmt.Errorf("%s runs on %s, not on %s", name, vm.Host, e.Cfg.Host)
 	}
 	lk, err := e.acquire(ctx, fmt.Sprintf("vm restart %s by %s (%s, %s)", name, c.Token, e.Cfg.Host, c.RequestID))
 	if err != nil {
@@ -155,37 +163,59 @@ func (e *Engine) restartVM(ctx context.Context, name string, pods []kube.Pod, em
 	if err != nil {
 		return err
 	}
+	if err := e.cordonAndDrain(ctx, name, pods, emit); err != nil {
+		return err
+	}
+	if err := e.unit(ctx, "restart", name); err != nil {
+		return fmt.Errorf("restart microvm@%s (node left cordoned): %w", name, err)
+	}
+	emit(fmt.Sprintf("microvm@%s restarted on %s", name, e.Cfg.Host))
+	return e.readyAndUncordon(ctx, name, before.BootID, emit)
+}
+
+// cordonAndDrain cordons the node and evicts its pods; a failed drain gives
+// the node back, since nothing was stopped yet.
+func (e *Engine) cordonAndDrain(ctx context.Context, name string, pods []kube.Pod, emit func(string)) error {
 	if err := e.Kube.SetUnschedulable(ctx, name, true); err != nil {
 		return fmt.Errorf("cordon: %w", err)
 	}
 	emit("node/" + name + " cordoned")
-
 	if err := e.drain(ctx, name, pods, emit); err != nil {
-		// Nothing was restarted: give the node back.
 		if uerr := e.Kube.SetUnschedulable(context.Background(), name, false); uerr == nil {
 			emit("node/" + name + " uncordoned after the failed drain")
 		}
 		return fmt.Errorf("drain: %w", err)
 	}
 	emit("node/" + name + " drained")
+	return nil
+}
 
-	rctx, cancel := context.WithTimeout(ctx, e.Timing.RestartTimeout)
-	_, err = e.Run(rctx, "systemctl", "--no-ask-password", "restart", "microvm@"+name+".service")
-	cancel()
-	if err != nil {
-		return fmt.Errorf("restart microvm@%s (node left cordoned): %w", name, err)
-	}
-	emit(fmt.Sprintf("microvm@%s restarted on %s", name, e.Cfg.Host))
+// unit runs systemctl restart|start|stop on a VM's unit.
+func (e *Engine) unit(ctx context.Context, verb, name string) error {
+	ctx, cancel := context.WithTimeout(ctx, e.Timing.RestartTimeout)
+	defer cancel()
+	_, err := e.Run(ctx, "systemctl", "--no-ask-password", verb, "microvm@"+name+".service")
+	return err
+}
 
+// unitState is the VM unit's ActiveState: active, inactive, failed…
+func (e *Engine) unitState(ctx context.Context, name string) (string, error) {
+	out, err := e.Run(ctx, "systemctl", "show", "--property=ActiveState", "--value", "microvm@"+name+".service")
+	return strings.TrimSpace(string(out)), err
+}
+
+// readyAndUncordon waits for the node to be Ready (with a boot ID other than
+// before, when given), uncordons it and checks the API.
+func (e *Engine) readyAndUncordon(ctx context.Context, name, before string, emit func(string)) error {
 	deadline := e.now().Add(e.Timing.BootTimeout)
 	lastNote := e.now()
 	for {
 		n, err := e.Kube.Node(ctx, name)
-		if err == nil && n.BootID != "" && n.BootID != before.BootID && n.Ready {
+		if err == nil && n.Ready && (before == "" || (n.BootID != "" && n.BootID != before)) {
 			break
 		}
 		if e.now().After(deadline) {
-			return fmt.Errorf("node/%s not Ready with a new boot after %s (left cordoned)", name, e.Timing.BootTimeout)
+			return fmt.Errorf("node/%s not Ready after %s (left cordoned)", name, e.Timing.BootTimeout)
 		}
 		if e.now().Sub(lastNote) >= 30*time.Second {
 			emit("waiting for node/" + name + " to be Ready")
@@ -195,14 +225,17 @@ func (e *Engine) restartVM(ctx context.Context, name string, pods []kube.Pod, em
 			return err
 		}
 	}
-	emit("node/" + name + " Ready (new boot)")
-
+	if before != "" {
+		emit("node/" + name + " Ready (new boot)")
+	} else {
+		emit("node/" + name + " Ready")
+	}
 	if err := e.Kube.SetUnschedulable(ctx, name, false); err != nil {
 		return fmt.Errorf("uncordon: %w", err)
 	}
 	emit("node/" + name + " uncordoned")
 	if err := e.Kube.Readyz(ctx); err != nil {
-		return fmt.Errorf("API not ready after the restart: %w", err)
+		return fmt.Errorf("API not ready: %w", err)
 	}
 	emit("Kubernetes API ready")
 	return nil

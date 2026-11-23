@@ -47,6 +47,7 @@
                   enable = true;
                   tokensFile = "/run/secrets/api-tokens";
                   manageUnitPrefixes = [ "microvm@" ];
+                  allowReboot = true;
                   settings = {
                     site = "test";
                     host = "test";
@@ -71,9 +72,18 @@
             cat > rule.js <<'EOF'
             var polkit = { Result: { YES: "yes", NOT_HANDLED: "no" }, rules: [], addRule: function (f) { this.rules.push(f); } };
             ${eval.config.security.polkit.extraConfig}
+            function decide(action, user) {
+              for (var i = 0; i < polkit.rules.length; i++) {
+                var r = polkit.rules[i](action, { user: user });
+                if (r !== "no" && r !== undefined && r !== null) { return r; }
+              }
+              return "no";
+            }
             function ask(user, unit, verb) {
-              var action = { id: "org.freedesktop.systemd1.manage-units", lookup: function (k) { return k == "unit" ? unit : verb; } };
-              return polkit.rules[0](action, { user: user });
+              return decide({ id: "org.freedesktop.systemd1.manage-units", lookup: function (k) { return k == "unit" ? unit : verb; } }, user);
+            }
+            function act(user, id) {
+              return decide({ id: id, lookup: function () { return ""; } }, user);
             }
             var cases = [
               ["clusterd", "microvm@hgd1-k8w01.service", "restart", "yes"],
@@ -86,6 +96,15 @@
             cases.forEach(function (c) {
               var got = ask(c[0], c[1], c[2]);
               if (got !== c[3]) { console.error("polkit", c, "got", got); process.exit(1); }
+            });
+            [
+              ["clusterd", "org.freedesktop.login1.reboot", "yes"],
+              ["clusterd", "org.freedesktop.login1.power-off", "no"],
+              ["clusterd", "org.freedesktop.login1.set-wall-message", "no"],
+              ["jurre", "org.freedesktop.login1.reboot", "no"],
+            ].forEach(function (c) {
+              var got = act(c[0], c[1]);
+              if (got !== c[2]) { console.error("polkit", c, "got", got); process.exit(1); }
             });
             EOF
             node rule.js

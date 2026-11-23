@@ -31,6 +31,8 @@ func fakeCollector(t *testing.T) *Collector {
 			return []byte(fakestore.OSDDF), nil
 		case strings.Contains(joined, "osd metadata"):
 			return []byte(fakestore.OSDMetadata), nil
+		case strings.Contains(joined, "osd dump"):
+			return []byte(`{"crush_node_flags":{"hv01":["noout"]}}`), nil
 		case strings.Contains(joined, "status"):
 			return []byte(cephJSON), nil
 		}
@@ -82,8 +84,11 @@ func TestOSDCache(t *testing.T) {
 	}
 	c.osds(context.Background())
 	c.osds(context.Background())
-	if calls != 2 { // osd df + osd metadata, once
-		t.Fatalf("ceph ran %d times for two lookups, want 2", calls)
+	if calls != 3 { // osd df, osd metadata and osd dump, once
+		t.Fatalf("ceph ran %d times for two lookups, want 3", calls)
+	}
+	if !c.maintenance(context.Background())["hv01"] {
+		t.Fatal("per-host noout not seen as maintenance")
 	}
 }
 
@@ -119,5 +124,39 @@ func TestS3NotConfigured(t *testing.T) {
 	st := c.S3(context.Background())
 	if len(st.Errors) != 1 || !strings.Contains(st.Errors[0], "not configured") || len(st.Gateways) != 2 {
 		t.Fatalf("s3 = %+v", st)
+	}
+}
+
+func TestChecks(t *testing.T) {
+	c := fakeCollector(t)
+	c.procRoot = fakeProc(t)
+	ch := c.Checks(context.Background(), "tok")
+	got := map[string]string{}
+	msg := map[string]string{}
+	for _, x := range ch.Checks {
+		got[x.Name], msg[x.Name] = x.Status, x.Message
+	}
+	want := map[string]string{
+		"hosts":      "warn", // hv01 in maintenance (per-host noout)
+		"units":      "fail", // broken.service
+		"vms":        "ok",
+		"nodes":      "fail", // no Kubernetes access in this test
+		"ceph":       "warn", // HEALTH_WARN, 1 osds down
+		"vips":       "ok",
+		"disks":      "ok",
+		"s3":         "warn", // gateway hv02 down
+		"tunnel":     "ok",
+		"monitoring": "ok",
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s: %s (%s), want %s", k, got[k], msg[k], w)
+		}
+	}
+	if ch.Status != "fail" || len(ch.Checks) != len(want) {
+		t.Errorf("overall %s with %d checks", ch.Status, len(ch.Checks))
+	}
+	if !strings.Contains(msg["hosts"], "hv01 in maintenance") || !strings.Contains(msg["units"], "hv01 broken.service") {
+		t.Errorf("messages: %v", msg)
 	}
 }

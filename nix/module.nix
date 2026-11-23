@@ -106,6 +106,16 @@ in
       '';
     };
 
+    allowReboot = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Let the clusterd user reboot this host (host maintenance with
+        --reboot, scope manage). polkit allows it the logind reboot actions
+        and nothing else.
+      '';
+    };
+
     extraGroups = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -114,7 +124,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    security.polkit = lib.mkIf (cfg.manageUnitPrefixes != [ ]) {
+    security.polkit = lib.mkIf (cfg.manageUnitPrefixes != [ ] || cfg.allowReboot) {
       enable = lib.mkDefault true;
       # Only these verbs, only these units, only this user.
       extraConfig = ''
@@ -131,6 +141,16 @@ in
                 allowed.indexOf(verb) >= 0) {
               return polkit.Result.YES;
             }
+          }
+          return polkit.Result.NOT_HANDLED;
+        });
+      '' + lib.optionalString cfg.allowReboot ''
+        polkit.addRule(function(action, subject) {
+          var reboot = ["org.freedesktop.login1.reboot",
+                        "org.freedesktop.login1.reboot-multiple-sessions",
+                        "org.freedesktop.login1.reboot-ignore-inhibit"];
+          if (subject.user == "clusterd" && reboot.indexOf(action.id) >= 0) {
+            return polkit.Result.YES;
           }
           return polkit.Result.NOT_HANDLED;
         });

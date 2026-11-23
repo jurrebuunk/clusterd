@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +23,46 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/server"
 	"github.com/jurrebuunk/clusterd/internal/status"
 )
+
+var unitsMu sync.Mutex
+var units = map[string]string{}
+var restarts []string
+
+// fakeSystemctl plays systemctl for VM units: restart and start give the
+// node a new boot, stop makes it NotReady.
+func fakeSystemctl(fake *kubefake.Kube) func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		unitsMu.Lock()
+		defer unitsMu.Unlock()
+		vm := ""
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "microvm@"); ok {
+				vm = strings.TrimSuffix(v, ".service")
+			}
+		}
+		state, ok := units[vm]
+		if !ok {
+			state = "active"
+		}
+		fake.Mu.Lock()
+		defer fake.Mu.Unlock()
+		switch {
+		case slices.Contains(args, "show"):
+			return []byte(state + "\n"), nil
+		case slices.Contains(args, "stop"):
+			units[vm] = "inactive"
+			fake.NodeMap[vm].Ready = false
+		case slices.Contains(args, "restart"), slices.Contains(args, "start"):
+			if slices.Contains(args, "restart") {
+				restarts = append(restarts, vm)
+			}
+			units[vm] = "active"
+			fake.NodeMap[vm].Ready = true
+			fake.NodeMap[vm].BootID = fake.NodeMap[vm].BootID + "+"
+		}
+		return nil, nil
+	}
+}
 
 // apiServer runs a real clusterd handler with one manage token.
 func apiServer(t *testing.T) (string, string) {
@@ -50,13 +92,8 @@ func apiServer(t *testing.T) (string, string) {
 	eng := &actions.Engine{Cfg: cfg, Kube: fake, Log: log,
 		Timing: actions.Timing{Poll: 2 * time.Millisecond, DrainTimeout: time.Second, RestartTimeout: time.Second,
 			BootTimeout: time.Second, LockTTL: 5 * time.Second, Total: 5 * time.Second},
-		Run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			fake.Mu.Lock()
-			fake.NodeMap["w1"].BootID = "boot-2"
-			fake.Mu.Unlock()
-			return nil, nil
-		}}
-	s, err := server.New(cfg, auth.NewStore(tokens), status.New(cfg, nil, log), eng, log)
+		Run: fakeSystemctl(fake)}
+	s, err := server.New(cfg, auth.NewStore(tokens), status.NewWith(cfg, fake, log), eng, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +172,37 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("unknown vm: %d %q", code, errs)
 	}
 
+	// Stop and start.
+	if code, out, errs := run(t, "", "vm", "stop", "w1", "--yes"); code != 0 || !strings.Contains(out, "microvm@w1 stopped") {
+		t.Fatalf("vm stop: %d %q %q", code, out, errs)
+	}
+	if code, _, errs := run(t, "", "vm", "start", "m1", "--yes"); code != ExitAPI || !strings.Contains(errs, "already active") {
+		t.Fatalf("start a running VM: %d %q", code, errs)
+	}
+	if code, out, errs := run(t, "", "vm", "start", "w1", "--yes"); code != 0 || !strings.Contains(out, "node/w1 uncordoned") {
+		t.Fatalf("vm start: %d %q %q", code, out, errs)
+	}
+
+	// Roll: agents first, every VM once.
+	restarts = nil
+	if code, out, errs := run(t, "", "vm", "roll", "--yes"); code != 0 || strings.Count(out, " done\n") != 4 {
+		t.Fatalf("vm roll: %d %q %q", code, out, errs)
+	}
+	if strings.Join(restarts, ",") != "w1,m1,m2,m3" {
+		t.Fatalf("roll order %v, want the agent first", restarts)
+	}
+
+	// Cordon and uncordon.
+	if code, out, _ := run(t, "", "node", "cordon", "m2"); code != 0 || strings.TrimSpace(out) != "node/m2 cordoned" {
+		t.Fatalf("cordon: %d %q", code, out)
+	}
+	run(t, "", "node", "uncordon", "m2")
+
+	// Health: no Kubernetes for the collector in this test, so nodes fail.
+	if code, out, _ := run(t, "", "health"); code != ExitUnhealthy || !strings.HasPrefix(out, "CHECK") || !strings.Contains(out, "nodes") {
+		t.Fatalf("health: %d %q", code, out)
+	}
+
 	// Environment overrides.
 	t.Setenv("LABCTL_TOKEN", "lab_wrong")
 	if code, _, _ := run(t, "", "whoami"); code != ExitAuth {
@@ -176,6 +244,21 @@ func TestTokenNew(t *testing.T) {
 	}
 	if code, _, _ := run(t, "", "token", "new", "--name", "ui", "--scope", "admin"); code != ExitUsage {
 		t.Fatal("bad scope accepted")
+	}
+}
+
+func TestUnitFilter(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                                  "",
+		"clusterd":                          `unit:in("clusterd", "clusterd.service")`,
+		"ceph-osd-0.service":                `unit:="ceph-osd-0.service"`,
+		"acme-order-renew-s3.lan.buunk.org": `unit:in("acme-order-renew-s3.lan.buunk.org", "acme-order-renew-s3.lan.buunk.org.service")`,
+		"ceph-osd*":                         `unit:"ceph-osd"*`,
+		"acme-renew-s3.lan.buunk.org.timer": `unit:="acme-renew-s3.lan.buunk.org.timer"`,
+	} {
+		if got := unitFilter(in); got != want {
+			t.Errorf("unitFilter(%q) = %s, want %s", in, got, want)
+		}
 	}
 }
 

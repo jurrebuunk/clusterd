@@ -62,7 +62,11 @@ func (f *Kube) Nodes(ctx context.Context) ([]api.K3sNode, error) {
 func (f *Kube) Node(ctx context.Context, name string) (api.K3sNode, error) {
 	f.Mu.Lock()
 	defer f.Mu.Unlock()
-	return *f.NodeMap[name], nil
+	n, ok := f.NodeMap[name]
+	if !ok {
+		return api.K3sNode{}, &kube.StatusError{Code: http.StatusNotFound, Message: "nodes \"" + name + "\" not found"}
+	}
+	return *n, nil
 }
 func (f *Kube) SetUnschedulable(ctx context.Context, name string, v bool) error {
 	f.Mu.Lock()

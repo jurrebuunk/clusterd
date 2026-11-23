@@ -163,3 +163,38 @@ func TestVMRestartForwarding(t *testing.T) {
 		t.Fatalf("double forward: %d", rec.Code)
 	}
 }
+
+func TestHostAndNodeRoutes(t *testing.T) {
+	h := newActionHarness(t)
+	var gotPath, gotBy string
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotBy = r.URL.RequestURI(), r.Header.Get(forwardedHeader)
+		json.NewEncoder(w).Encode(api.HostPlan{Host: "hv2"})
+	}))
+	defer peer.Close()
+	h.cfg.Hosts = append(h.cfg.Hosts, config.Host{Name: "hv2", API: peer.URL, Metrics: "http://x", Logs: "http://x"})
+	op, mg := h.tokens[auth.ScopeOperator], h.tokens[auth.ScopeManage]
+
+	if w := do(h.handler, "POST", "/v1/actions/hosts/hv2/maintenance?dry_run=1", op); w.Code != 403 {
+		t.Fatalf("operator on host maintenance: %d", w.Code)
+	}
+	if w := do(h.handler, "POST", "/v1/actions/hosts/hv9/maintenance", mg); w.Code != 404 {
+		t.Fatalf("unknown host: %d", w.Code)
+	}
+	w := do(h.handler, "POST", "/v1/actions/hosts/hv2/maintenance?dry_run=1&reboot=1", mg)
+	if w.Code != 200 || gotPath != "/v1/actions/hosts/hv2/maintenance?dry_run=1&reboot=1" || gotBy != "hv1" {
+		t.Fatalf("forward: %d %q %q", w.Code, gotPath, gotBy)
+	}
+
+	h.fake.NodeMap["w1"].Schedulable = false
+	w = do(h.handler, "POST", "/v1/actions/nodes/w1/uncordon", op)
+	if w.Code != 200 || !h.fake.NodeMap["w1"].Schedulable || !strings.Contains(w.Body.String(), "node/w1 uncordoned") {
+		t.Fatalf("uncordon: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h.handler, "POST", "/v1/actions/nodes/nope/cordon", op); w.Code != 404 {
+		t.Fatalf("unknown node: %d %s", w.Code, w.Body.String())
+	}
+	if w := do(h.handler, "POST", "/v1/actions/nodes/w1/cordon", h.tokens[auth.ScopeRead]); w.Code != 403 {
+		t.Fatalf("read token cordon: %d", w.Code)
+	}
+}

@@ -20,10 +20,15 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/kube"
 )
 
+// NodeLister lists Kubernetes nodes (*kube.Client, or a fake in tests).
+type NodeLister interface {
+	Nodes(ctx context.Context) ([]api.K3sNode, error)
+}
+
 // Collector answers /v1/node and /v1/status.
 type Collector struct {
 	cfg   *config.Config
-	kube  *kube.Client
+	kube  NodeLister
 	log   *slog.Logger
 	peers *http.Client // to other clusterd instances, TLS verified against ServerName
 	plain *http.Client // to the local stores
@@ -53,9 +58,18 @@ const cephStale = 60 * time.Second
 
 // New builds a collector. kc may be nil when no kubeconfig is configured.
 func New(cfg *config.Config, kc *kube.Client, log *slog.Logger) *Collector {
+	var nl NodeLister
+	if kc != nil {
+		nl = kc
+	}
+	return NewWith(cfg, nl, log)
+}
+
+// NewWith builds a collector on any node lister (nil: no Kubernetes).
+func NewWith(cfg *config.Config, nl NodeLister, log *slog.Logger) *Collector {
 	return &Collector{
 		cfg:  cfg,
-		kube: kc,
+		kube: nl,
 		log:  log,
 		peers: &http.Client{
 			Timeout: cfg.Limits.PeerTimeout.Duration,
@@ -103,10 +117,10 @@ func (c *Collector) nodeFacts(ctx context.Context, token string) (map[string]*ap
 	return nodes, errs
 }
 
-func (c *Collector) hostStatuses(nodes map[string]*api.Node, errs map[string]error) []api.HostStatus {
+func (c *Collector) hostStatuses(nodes map[string]*api.Node, errs map[string]error, maint map[string]bool) []api.HostStatus {
 	out := []api.HostStatus{}
 	for _, h := range c.cfg.Hosts {
-		hs := api.HostStatus{Name: h.Name}
+		hs := api.HostStatus{Name: h.Name, Maintenance: maint[h.Name]}
 		if n := nodes[h.Name]; n != nil {
 			hs.Reachable = true
 			hs.Version = n.Version
@@ -127,8 +141,14 @@ func (c *Collector) hostStatuses(nodes map[string]*api.Node, errs map[string]err
 
 // Hosts is GET /v1/status/hosts.
 func (c *Collector) Hosts(ctx context.Context, token string) api.HostsStatus {
-	nodes, errs := c.nodeFacts(ctx, token)
-	return api.HostsStatus{Hosts: c.hostStatuses(nodes, errs)}
+	var nodes map[string]*api.Node
+	var errs map[string]error
+	var maint map[string]bool
+	var wg sync.WaitGroup
+	wg.Go(func() { nodes, errs = c.nodeFacts(ctx, token) })
+	wg.Go(func() { maint = c.maintenance(ctx) })
+	wg.Wait()
+	return api.HostsStatus{Hosts: c.hostStatuses(nodes, errs, maint)}
 }
 
 // VMs is GET /v1/status/vms.
@@ -161,7 +181,7 @@ func (c *Collector) Status(ctx context.Context, token string) api.Status {
 	wg.Go(func() { st.Disks = c.Disks(ctx) })
 	wg.Go(func() { st.S3 = c.S3(ctx) })
 	wg.Wait()
-	st.Hosts = c.hostStatuses(nodes, errs)
+	st.Hosts = c.hostStatuses(nodes, errs, c.maintenance(ctx))
 	st.VMs = vmStates(c.cfg.VMs, nodes)
 	st.VIPs = vipOwners(c.cfg.VIPs, c.cfg.Hosts, nodes)
 	return st

@@ -126,6 +126,9 @@ func printHosts(tw *tabwriter.Writer, warn io.Writer, hosts []api.HostStatus) (u
 			continue
 		}
 		status := "Up"
+		if h.Maintenance {
+			status += ",Maintenance"
+		}
 		for _, s := range h.Stores {
 			if !s.OK {
 				status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
@@ -513,14 +516,8 @@ func buildLogsQuery(host, unit string, since time.Duration, limit int, follow bo
 	if host != "" {
 		filters = append(filters, "host:="+strconv.Quote(host))
 	}
-	switch {
-	case unit == "":
-	case strings.Contains(unit, "."):
-		filters = append(filters, "unit:="+strconv.Quote(unit))
-	default:
-		// Like journalctl -u: "clusterd" means clusterd.service, but syslog
-		// apps (the router's "filterlog") have no suffix.
-		filters = append(filters, fmt.Sprintf("unit:in(%s, %s)", strconv.Quote(unit), strconv.Quote(unit+".service")))
+	if f := unitFilter(unit); f != "" {
+		filters = append(filters, f)
 	}
 	user = strings.TrimSpace(user)
 	hasPipe := strings.Contains(user, "|")
@@ -540,6 +537,30 @@ func buildLogsQuery(host, unit string, since time.Duration, limit int, follow bo
 	return q
 }
 
+// systemdSuffixes are the unit types a --unit value may already end in.
+var systemdSuffixes = []string{".service", ".socket", ".timer", ".mount", ".scope", ".slice", ".target", ".path", ".swap", ".device"}
+
+// unitFilter turns --unit into LogsQL:
+//   - "ceph-osd*" matches every unit starting with ceph-osd;
+//   - "ceph-osd-0.service" matches exactly;
+//   - anything else matches with or without ".service", like journalctl -u,
+//     so "clusterd" and the router's syslog app "filterlog" both work, and so
+//     do names with dots ("acme-order-renew-s3.lan.buunk.org").
+func unitFilter(unit string) string {
+	switch {
+	case unit == "":
+		return ""
+	case strings.HasSuffix(unit, "*"):
+		return "unit:" + strconv.Quote(strings.TrimSuffix(unit, "*")) + "*"
+	}
+	for _, suf := range systemdSuffixes {
+		if strings.HasSuffix(unit, suf) {
+			return "unit:=" + strconv.Quote(unit)
+		}
+	}
+	return fmt.Sprintf("unit:in(%s, %s)", strconv.Quote(unit), strconv.Quote(unit+".service"))
+}
+
 func fmtLogsDuration(d time.Duration) string {
 	if d%(24*time.Hour) == 0 {
 		return fmt.Sprintf("%dd", d/(24*time.Hour))
@@ -556,7 +577,7 @@ func fmtLogsDuration(d time.Duration) string {
 func cmdLogs(e *env, args []string) error {
 	fs := newFlags(e, "logs")
 	host := fs.String("host", "", "only this host (e.g. hgd1-hv01, hgd1-fw01)")
-	unit := fs.String("unit", "", "only this systemd unit or syslog app")
+	unit := fs.String("unit", "", "only this systemd unit or syslog app; \"ceph-osd*\" for a prefix")
 	since := fs.String("since", "1h", "how far back")
 	limit := fs.Int("limit", 100, "at most this many lines")
 	follow := fs.Bool("follow", false, "keep printing new lines (Ctrl-C stops)")

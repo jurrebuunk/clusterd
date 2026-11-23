@@ -24,6 +24,7 @@ const (
 	ExitUsage       = 2
 	ExitUnreachable = 3
 	ExitAuth        = 4
+	ExitUnhealthy   = 5 // labctl health: not every check is ok
 )
 
 type exitError struct {
@@ -63,10 +64,13 @@ func commands() []command {
 		{"login", "[--api URL] [--token-file F]", "Store and check a token for the site", cmdLogin},
 		{"use", "[site]", "Switch the current site, or list sites", cmdUse},
 		{"whoami", "", "Show the site, token name and scope", cmdWhoami},
-		{"status", "[hosts|vms|nodes|ceph|vips]", "Hosts, VMs, k3s nodes, Ceph and VIP owners", cmdStatus},
+		{"status", "[host|vm|node|ceph|vip|disk|s3]", "Status of everything, or one part", cmdStatus},
 		{"metrics", "query|range <promql> [flags]", "Query metrics (PromQL / MetricsQL)", cmdMetrics},
 		{"logs", "[--host H] [--unit U] [--since D] [--limit N] [--follow] [query]", "Search or follow logs (LogsQL)", cmdLogs},
-		{"vm", "restart <vm> [--yes] [--dry-run]", "Restart a VM safely: cordon, drain, restart, wait Ready, uncordon", cmdVM},
+		{"health", "", "One verdict per area; exit code 5 unless everything is ok", cmdHealth},
+		{"vm", "restart|stop|start <vm> [--yes] [--dry-run] | roll [vm...]", "Restart, stop or start VMs safely (drain first, uncordon after)", cmdVM},
+		{"node", "cordon|uncordon <node>", "Mark a node (un)schedulable", cmdNode},
+		{"host", "maintenance|resume <host> [--reboot] [--yes] [--dry-run]", "Take a host out for maintenance and bring it back", cmdHost},
 		{"token", "new --name N --scope read|operator|manage [--out F]", "Generate a token and its hash line (local)", cmdToken},
 		{"version", "", "Show labctl and server versions", cmdVersion},
 		{"completion", "bash|zsh|fish", "Print a shell completion script", cmdCompletion},
@@ -82,7 +86,7 @@ func usage(w io.Writer) {
 	}
 	tw.Flush()
 	fmt.Fprintln(w, "\nEnvironment: LABCTL_API, LABCTL_TOKEN, LABCTL_SITE.")
-	fmt.Fprintln(w, "Exit codes: 0 ok, 1 API error, 2 usage, 3 unreachable, 4 token missing or not allowed.")
+	fmt.Fprintln(w, "Exit codes: 0 ok, 1 API error, 2 usage, 3 unreachable, 4 token missing or not allowed, 5 health not ok.")
 }
 
 // Main runs labctl and returns the exit code.

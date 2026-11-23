@@ -21,9 +21,10 @@ const fsTypes = "ext4|xfs|btrfs|vfat|f2fs|zfs"
 const osdRefresh = 60 * time.Second
 
 type osdInfo struct {
-	at   time.Time
-	osds []api.OSD
-	err  error
+	at          time.Time
+	osds        []api.OSD
+	maintenance map[string]bool // host -> Ceph per-host noout
+	err         error
 }
 
 type cephOSDDF struct {
@@ -44,23 +45,38 @@ type cephOSDMeta struct {
 	Devices  string `json:"devices"`
 }
 
-func (c *Collector) fetchOSDs(ctx context.Context) ([]api.OSD, error) {
+func (c *Collector) fetchOSDs(ctx context.Context) ([]api.OSD, map[string]bool, error) {
 	cc := c.cfg.Ceph
 	if cc.Keyring == "" || cc.ID == "" {
-		return []api.OSD{}, fmt.Errorf("ceph not configured")
+		return []api.OSD{}, nil, fmt.Errorf("ceph not configured")
 	}
 	args := []string{"--id", cc.ID, "--keyring", cc.Keyring, "--connect-timeout", "5"}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	dfOut, err := c.run(ctx, cc.Command, append(args, "osd", "df", "--format", "json")...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	metaOut, err := c.run(ctx, cc.Command, append(args, "osd", "metadata", "--format", "json")...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return parseOSDs(dfOut, metaOut)
+	osds, err := parseOSDs(dfOut, metaOut)
+	if err != nil {
+		return nil, nil, err
+	}
+	maint := map[string]bool{}
+	if dumpOut, err := c.run(ctx, cc.Command, append(args, "osd", "dump", "--format", "json")...); err == nil {
+		var d struct {
+			CrushNodeFlags map[string][]string `json:"crush_node_flags"`
+		}
+		if json.Unmarshal(dumpOut, &d) == nil {
+			for h, flags := range d.CrushNodeFlags {
+				maint[h] = slicesContains(flags, "noout")
+			}
+		}
+	}
+	return osds, maint, nil
 }
 
 func parseOSDs(dfOut, metaOut []byte) ([]api.OSD, error) {
@@ -93,34 +109,52 @@ func parseOSDs(dfOut, metaOut []byte) ([]api.OSD, error) {
 // osds answers from a cache refreshed every osdRefresh, merging concurrent
 // refreshes like the Ceph health cache does.
 func (c *Collector) osds(ctx context.Context) ([]api.OSD, error) {
+	v := c.osdInfo(ctx)
+	return v.osds, v.err
+}
+
+// maintenance returns the hosts with Ceph's per-host noout flag.
+func (c *Collector) maintenance(ctx context.Context) map[string]bool {
+	return c.osdInfo(ctx).maintenance
+}
+
+// Invalidate drops the OSD cache, after an action changed what it shows.
+func (c *Collector) Invalidate() {
+	c.osdMu.Lock()
+	c.osdVal = osdInfo{}
+	c.osdMu.Unlock()
+}
+
+func (c *Collector) osdInfo(ctx context.Context) osdInfo {
 	c.osdMu.Lock()
 	v := c.osdVal
 	if !v.at.IsZero() && c.now().Sub(v.at) < osdRefresh {
 		c.osdMu.Unlock()
-		return v.osds, v.err
+		return v
 	}
 	if ch := c.osdInflight; ch != nil {
 		c.osdMu.Unlock()
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return osdInfo{err: ctx.Err()}
 		}
 		c.osdMu.Lock()
 		defer c.osdMu.Unlock()
-		return c.osdVal.osds, c.osdVal.err
+		return c.osdVal
 	}
 	ch := make(chan struct{})
 	c.osdInflight = ch
 	c.osdMu.Unlock()
 
-	osds, err := c.fetchOSDs(context.Background())
+	osds, maint, err := c.fetchOSDs(context.Background())
+	v = osdInfo{at: c.now(), osds: osds, maintenance: maint, err: err}
 	c.osdMu.Lock()
-	c.osdVal = osdInfo{at: c.now(), osds: osds, err: err}
+	c.osdVal = v
 	c.osdInflight = nil
 	c.osdMu.Unlock()
 	close(ch)
-	return osds, err
+	return v
 }
 
 // Disks gathers physical disks, filesystems and OSDs.

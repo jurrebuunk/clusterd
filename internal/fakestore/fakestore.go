@@ -63,6 +63,8 @@ var answers = []struct {
 	{"ceph_pool_stored", []series{s("3000000000", "pool_id", "8", "name", "default.rgw.buckets.data")}},
 	{"ceph_pool_max_avail", []series{s("297000000000", "pool_id", "8", "name", "default.rgw.buckets.data")}},
 	{"probe_ssl_earliest_cert_expiry", []series{s("1803167241")}},
+	{"cloudflared_tunnel_ha_connections", []series{s("4", "instance", "hv01")}},
+	{"node_systemd_unit_state", []series{s("1", "instance", "hv01", "name", "broken.service")}},
 }
 
 // Store is a fake VictoriaMetrics: /health and /api/v1/query.

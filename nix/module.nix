@@ -54,7 +54,9 @@ in
       type = lib.types.path;
       description = ''
         File with one "<name> <scope> sha256:<hex>" line per token (from
-        `labctl token new`). Read at start and on reload.
+        `labctl token new`). It is handed over as a systemd credential, which
+        systemd copies at start: restart the service after changing it (a
+        reload re-reads the copy, and only the certificate changes on reload).
       '';
     };
 

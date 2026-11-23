@@ -1,8 +1,8 @@
 # Plan
 
-Where this repo is going, so I can pick it up from here. Steps 1 and 2 are
-built; `v1.0.0-rc.1` runs on the hgd1 cluster. Left for v1: a week of use,
-then tag `v1.0.0`. After that: [After v1](#after-v1).
+Where this repo is going, so I can pick it up from here. **v1 is done:**
+`v1.0.0` runs on the hgd1 cluster and on my laptop. What's next:
+[After v1](#after-v1).
 
 ## Goal
 
@@ -201,8 +201,7 @@ through the VIP, with tokens. Nothing can be changed yet. **Done 2026-11-23.**
 ### Step 2: actions and a stable API (`v1.0.0`)
 
 Goal: the first real action, safe enough for the web UI, and a `/v1` I
-promise not to break. **Built and running as `v1.0.0-rc.1` since
-2026-11-23;** `v1.0.0` follows after a week of use (last open item).
+promise not to break. **Done: `v1.0.0`, released 2026-11-23.**
 
 **Actions**
 
@@ -241,6 +240,21 @@ promise not to break. **Built and running as `v1.0.0-rc.1` since
       `labctl status <section>`, `Client Version`/`Server Version`. `--json`
       is unchanged.
 
+**Status per part, disks and S3** (added for `v1.0.0`)
+
+- [x] `GET /v1/status/{hosts,vms,k3s,ceph,vips,disks,s3}` next to the full
+      `/v1/status` (spec `1.1.0`, additive); `labctl status <part>` calls them.
+- [x] Disks: every drive's size and how full it is (its OSD, or the
+      filesystems on its partitions), role, NVMe wear, temperature, SMART;
+      filesystems of hosts and VMs; OSDs. From the SMART/node metrics and
+      `ceph osd df` (60 s cache; the Ceph key got `mgr 'allow r'`).
+- [x] S3: gateways, users, buckets (objects, size, quota), the data pool's
+      room, certificate expiry. Buckets through the RGW admin API with a
+      read-only user (`clusterd`, caps `buckets,users,usage,metadata=read`),
+      requests signed with SigV4 (checked against AWS's test vectors and a
+      real bucket).
+- [x] Ceph status reports raw capacity.
+
 **Privileges and audit**
 
 - [x] Module option `manageUnitPrefixes` writes the polkit rule: the
@@ -262,9 +276,9 @@ promise not to break. **Built and running as `v1.0.0-rc.1` since
 - [x] Tests with fakes for Kubernetes, `systemctl`, Ceph and the stores.
 - [x] Shell completion (`labctl completion bash|zsh|fish`, installed by the
       Nix package), with VM, host and site names.
-- [x] `v1.0.0-rc.1` deployed.
-- [ ] Used for a week, then `v1.0.0` (bump `VERSION`, tag, pin it in the
-      cluster repo and on the laptop).
+- [x] `v1.0.0-rc.1` deployed and tested (rolling restart of all VMs).
+- [x] `v1.0.0` released the same day on my call instead of after a week; it
+      also carries the status parts, disks and S3 below.
 - [x] Handbook describes `v1.0.0-rc.1` as built and tested.
 
 **Done when**
@@ -276,7 +290,7 @@ promise not to break. **Built and running as `v1.0.0-rc.1` since
 - [x] Every action shows up in `labctl logs --unit clusterd audit`.
 - [x] An `operator` token restarted a VM (through a forward from hv02 to
       hv03); a `read` token gets `403`.
-- [ ] `v1.0.0` is published and deployed (after the week).
+- [x] `v1.0.0` is published and deployed on the hosts and the laptop.
 
 ### After v1
 

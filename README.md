@@ -57,7 +57,7 @@ the file, never to the terminal. Scopes nest: `read` ⊂ `operator` ⊂ `manage`
 
 ```nix
 inputs.clusterd = {
-  url = "github:jurrebuunk/clusterd/v2.0.0";
+  url = "github:jurrebuunk/clusterd/v1.2.0";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 # modules = [ clusterd.nixosModules.clusterd ];

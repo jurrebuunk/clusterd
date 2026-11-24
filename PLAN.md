@@ -2,7 +2,7 @@
 
 Where this repo is going, so I can pick it up from here. **v1 is done:**
 `v1.1.0` runs on the hgd1 cluster and on my laptop. In progress:
-[step 4](#step-4-one-consistent-api-and-cli-v200).
+[step 4](#step-4-one-consistent-api-and-cli-v120).
 
 ## Goal
 
@@ -361,12 +361,12 @@ so `scripts/vm.sh` and `scripts/k3s-roll.sh` can be deleted.
 - [x] `labctl health` exits 0 on a healthy site and 5 with a broken part.
 - [x] `v1.1.0` released and deployed; the scripts are gone.
 
-### Step 4: one consistent API and CLI (`v2.0.0`)
+### Step 4: one consistent API and CLI (`v1.2.0`)
 
 Goal: the API and `labctl` follow the conventions of real tools, so new parts
 (S3 writes, history, pods) slot in without special cases. Nothing is built on
-the API yet besides `labctl`, so this breaks freely; **`/v1` is stable from
-`2.0.0` on**, not before. The path keeps `/v1`: it is the API's generation,
+the API yet besides `labctl`, so this breaks freely in a minor release;
+**`/v1` is stable from `2.0.0` on**, not before. The path keeps `/v1`: it is the API's generation,
 not the release number.
 
 **API: resources, not trees** (as Kubernetes, GitHub, DigitalOcean, Proxmox)
@@ -448,7 +448,7 @@ not the release number.
 
 **Cluster repo and docs**
 
-- [ ] Set `system.configurationRevision`; the RGW cap; pin `v2.0.0`.
+- [ ] Set `system.configurationRevision`; the RGW cap; pin `v1.2.0`.
 - [ ] Handbook and reference pages on the new commands and paths.
 
 **Done when**
@@ -458,7 +458,7 @@ not the release number.
 - [ ] `labctl host list` shows the same commit on every host after a deploy.
 - [ ] A bucket and a user created, used with `aws s3`, and deleted again,
       only through `labctl`.
-- [ ] `v2.0.0` released and deployed.
+- [ ] `v1.2.0` released and deployed.
 
 ### Later
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -217,9 +218,14 @@ func (f *FakeRGW) serve(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusNotFound, "NoSuchBucket")
 			return
 		}
-		var quota map[string]any
-		json.NewDecoder(r.Body).Decode(&quota)
-		b.quota = quota
+		// Like RGW: a signed body is refused here, settings come as query
+		// parameters.
+		if r.ContentLength > 0 {
+			fail(http.StatusNotImplemented, "NotImplemented")
+			return
+		}
+		size, _ := strconv.ParseInt(q.Get("max-size"), 10, 64)
+		b.quota = map[string]any{"enabled": q.Get("enabled") == "true", "max_size": size, "max_objects": -1}
 	case r.URL.Path == "/admin/bucket" && r.Method == http.MethodDelete:
 		b, ok := f.buckets[q.Get("bucket")]
 		switch {

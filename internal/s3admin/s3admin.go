@@ -320,12 +320,15 @@ func (c *Client) DeleteBucket(ctx context.Context, bucket string, purge bool) er
 	return c.do(ctx, http.MethodDelete, "/admin/bucket", url.Values{"bucket": {bucket}, "purge-objects": {strconv.FormatBool(purge)}}, nil, c.Cred, nil)
 }
 
-// SetBucketQuota sets a size limit in bytes on a bucket; 0 removes it.
+// SetBucketQuota sets a size limit in bytes on a bucket; 0 removes it. The
+// settings go as query parameters: RGW refuses a SigV4-signed body for this
+// admin call (501 NotImplemented), but reads the same settings from the query
+// when there is no body.
 func (c *Client) SetBucketQuota(ctx context.Context, owner, bucket string, maxBytes int64) error {
-	q := map[string]any{"enabled": maxBytes > 0, "max_size": -1, "max_size_kb": 0, "max_objects": -1}
+	q := url.Values{"quota": {""}, "uid": {owner}, "bucket": {bucket},
+		"enabled": {strconv.FormatBool(maxBytes > 0)}, "max-size": {"-1"}, "max-objects": {"-1"}}
 	if maxBytes > 0 {
-		q["max_size"], q["max_size_kb"] = maxBytes, (maxBytes+1023)/1024
+		q.Set("max-size", strconv.FormatInt(maxBytes, 10))
 	}
-	body, _ := json.Marshal(q)
-	return c.do(ctx, http.MethodPut, "/admin/bucket", url.Values{"quota": {""}, "uid": {owner}, "bucket": {bucket}}, body, c.Cred, nil)
+	return c.do(ctx, http.MethodPut, "/admin/bucket", q, nil, c.Cred, nil)
 }

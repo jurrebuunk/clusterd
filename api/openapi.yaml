@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: clusterd
-  version: 2.0.0
+  version: 1.3.0
   summary: Platform API of the homelab
   description: |
     One stateless instance per hypervisor behind a highly available address.
@@ -15,8 +15,8 @@ info:
     the action starts and the answer is its operation (202, `Location:
     /v1/operations/{id}`), or with `wait=true` its progress as JSON lines.
 
-    Stable from 2.0.0: /v1 only changes in backward-compatible ways (new
-    endpoints, new optional fields); anything breaking goes to /v2.
+    Until 2.0.0, /v1 may still change incompatibly (only labctl uses it);
+    from 2.0.0 on it only changes in backward-compatible ways.
     Handbook: https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/
 servers:
   - url: https://api.lan.buunk.org

@@ -1,7 +1,7 @@
 # Plan
 
 Where this repo is going, so I can pick it up from here. **v1 is done:**
-`v1.2.0` runs on the hgd1 cluster. In progress:
+`v1.2.1` runs on the hgd1 cluster. In progress:
 [step 4](#step-4-one-consistent-api-and-cli-v120).
 
 ## Goal
@@ -414,7 +414,7 @@ not the release number.
 
 **S3 writes**
 
-- [ ] The RGW user `clusterd` gets `users=*; buckets=*` instead of read-only
+- [x] The RGW user `clusterd` gets `users=*; buckets=*` instead of read-only
       caps; every S3 write needs `manage`.
 - [x] Creating a user returns its keys once; `labctl` only writes them to a
       mode-600 file (`--out`), never to the terminal.
@@ -449,7 +449,7 @@ not the release number.
 **Cluster repo and docs**
 
 - [x] Set `system.configurationRevision`; pin `v1.2.0`.
-- [ ] The RGW cap (`users=*; buckets=*`); until then S3 writes answer 502.
+- [x] The RGW cap (`users=*; buckets=*`); until then S3 writes answer 502.
 - [x] Handbook and reference pages on the new commands and paths.
 
 **Done when**
@@ -457,7 +457,7 @@ not the release number.
 - [x] Every old command has a new form and the old ones are gone.
 - [x] `labctl op list` shows the last day's actions with who and result.
 - [x] `labctl host list` shows the same commit on every host after a deploy.
-- [ ] A bucket and a user created, used with `aws s3`, and deleted again,
+- [x] A bucket and a user created, used with `aws s3`, and deleted again,
       only through `labctl`.
 - [x] `v1.2.0` released and deployed.
 

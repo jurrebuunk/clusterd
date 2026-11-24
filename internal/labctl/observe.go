@@ -98,11 +98,12 @@ func printStatus(w, warn io.Writer, st api.Status, now time.Time) {
 }
 
 func printHosts(tw *tabwriter.Writer, warn io.Writer, hosts []api.HostStatus) (unreachable int) {
-	fmt.Fprintln(tw, "HOST\tSTATUS\tCLUSTERD\tUPTIME\tLOAD\tMEM")
+	fmt.Fprintln(tw, "HOST\tSTATUS\tCLUSTERD\tCOMMIT\tUPTIME\tLOAD\tMEM")
+	revs := map[string]bool{}
 	for _, h := range hosts {
 		if !h.Reachable {
 			unreachable++
-			fmt.Fprintf(tw, "%s\tUnreachable\t-\t-\t-\t-\n", h.Name)
+			fmt.Fprintf(tw, "%s\tUnreachable\t-\t-\t-\t-\t-\n", h.Name)
 			fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, shortError(h.Error))
 			continue
 		}
@@ -110,7 +111,14 @@ func printHosts(tw *tabwriter.Writer, warn io.Writer, hosts []api.HostStatus) (u
 		if h.Error != "" {
 			fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, h.Error)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.0f%%\n", h.Name, status, h.Version, age(time.Duration(h.UptimeSeconds)*time.Second), h.Load1, h.MemUsedPercent)
+		rev := commit(h)
+		if rev != "-" {
+			revs[rev] = true
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%.2f\t%.0f%%\n", h.Name, status, h.Version, rev, age(time.Duration(h.UptimeSeconds)*time.Second), h.Load1, h.MemUsedPercent)
+	}
+	if len(revs) > 1 {
+		fmt.Fprintln(warn, "warning: hosts run different commits; deploy the rest")
 	}
 	return unreachable
 }
@@ -124,12 +132,30 @@ func hostState(h api.HostStatus) string {
 	if h.Maintenance {
 		status += ",Maintenance"
 	}
+	if h.NixOS != nil && h.NixOS.RebootRequired {
+		status += ",RebootNeeded"
+	}
 	for _, s := range h.Stores {
 		if !s.OK {
 			status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
 		}
 	}
 	return status
+}
+
+// commit is the short git commit a host was built from, "-" when unknown.
+func commit(h api.HostStatus) string {
+	if h.NixOS == nil || h.NixOS.Revision == "" {
+		return "-"
+	}
+	r, dirty := strings.CutSuffix(h.NixOS.Revision, "-dirty")
+	if len(r) > 7 {
+		r = r[:7]
+	}
+	if dirty {
+		r += "-dirty"
+	}
+	return r
 }
 
 func printVMs(tw *tabwriter.Writer, vms []api.VMStatus) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jurrebuunk/clusterd/internal/config"
 	"github.com/jurrebuunk/clusterd/internal/fakestore"
+	"github.com/jurrebuunk/clusterd/internal/kubefake"
 )
 
 func fakeCollector(t *testing.T) *Collector {
@@ -27,6 +28,7 @@ func fakeCollector(t *testing.T) *Collector {
 	cfg.Ceph.Command, cfg.Ceph.ID, cfg.Ceph.Keyring = "ceph", "clusterd", "/k"
 	cfg.S3.Endpoint, cfg.S3.Credentials, cfg.S3.DataPool = "https://s3.test", cred, "default.rgw.buckets.data"
 	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.sysRoot = t.TempDir()
 	c.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		switch {
@@ -150,6 +152,7 @@ func TestChecks(t *testing.T) {
 		"s3":         "warn", // gateway hv02 down
 		"tunnel":     "ok",
 		"monitoring": "ok",
+		"pods":       "ok", // k3s unreachable: the nodes check says so
 	}
 	for k, w := range want {
 		if got[k] != w {
@@ -161,6 +164,24 @@ func TestChecks(t *testing.T) {
 	}
 	if !strings.Contains(msg["hosts"], "hv01 in maintenance") || !strings.Contains(msg["units"], "hv01 broken.service") {
 		t.Errorf("messages: %v", msg)
+	}
+}
+
+func TestChecksPods(t *testing.T) {
+	c := fakeCollector(t)
+	fake := kubefake.New()
+	fake.FailPod = "web-2"
+	c.kube = fake
+	for _, x := range c.Checks(context.Background(), "tok").Checks {
+		if x.Name == "pods" && (x.Status != "warn" || x.Message != "apps/web-2 (CrashLoopBackOff)") {
+			t.Errorf("pods = %+v", x)
+		}
+	}
+	fake.FailPod = ""
+	for _, x := range c.Checks(context.Background(), "tok").Checks {
+		if x.Name == "pods" && (x.Status != "ok" || x.Message != "4 pods") {
+			t.Errorf("pods = %+v", x)
+		}
 	}
 }
 

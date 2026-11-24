@@ -119,7 +119,7 @@ not allowed, 5 health not ok.`,
 		c.GroupID = "site"
 		root.AddCommand(c)
 	}
-	for _, c := range []*cobra.Command{cmdHost(e), cmdVM(e), cmdNode(e), cmdCeph(e), cmdOSD(e), cmdDisk(e),
+	for _, c := range []*cobra.Command{cmdHost(e), cmdVM(e), cmdNode(e), cmdPod(e), cmdCeph(e), cmdOSD(e), cmdDisk(e),
 		cmdFilesystem(e), cmdVIP(e), cmdS3(e)} {
 		c.GroupID = "res"
 		root.AddCommand(c)

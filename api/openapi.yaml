@@ -367,6 +367,22 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "503": { $ref: "#/components/responses/NoKubernetes" }
 
+  /v1/pods:
+    get:
+      summary: "Kubernetes pods of every namespace"
+      x-scope: read
+      description: |
+        When the k3s API can't be reached the list is empty and errors says why.
+      parameters:
+        - { name: failing, in: query, schema: { type: boolean }, description: "Only pods that need a look (see Pod.failing)" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PodList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /v1/ceph:
     get:
       summary: "Ceph health and raw capacity (refreshed every 10 s)"
@@ -688,6 +704,7 @@ components:
               active: { type: string, description: systemd ActiveState }
               sub: { type: string, description: systemd SubState }
         stores: { type: array, items: { $ref: "#/components/schemas/StoreHealth" } }
+        nixos: { $ref: "#/components/schemas/NixOS" }
         errors: { type: array, items: { type: string } }
     Status:
       type: object
@@ -750,16 +767,49 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/S3Bucket" } }
         errors: { type: array, items: { type: string } }
+    PodList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Pod" } }
+        errors: { type: array, items: { type: string } }
     OperationList:
       type: object
       required: [items]
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/Operation" } }
         errors: { type: array, items: { type: string } }
+    NixOS:
+      type: object
+      properties:
+        version: { type: string }
+        revision: { type: string, description: "Git commit of the flake the system was built from (system.configurationRevision)" }
+        generation: { type: integer, description: The system profile's generation }
+        reboot_required: { type: boolean, description: "Kernel, initrd or modules differ from the booted system's" }
+    Pod:
+      type: object
+      properties:
+        namespace: { type: string }
+        name: { type: string }
+        node: { type: string }
+        phase: { type: string }
+        ready: { type: integer, description: Containers that are ready }
+        containers: { type: integer }
+        restarts: { type: integer }
+        last_restart: { type: string, format: date-time }
+        reason: { type: string, description: "CrashLoopBackOff, ImagePullBackOff, Evicted, …" }
+        created: { type: string, format: date-time }
+        failing:
+          type: boolean
+          description: |
+            Failed or Unknown, Pending or not ready for over 5 minutes, a
+            container crash-looping or unable to pull, or restarted in the
+            last hour.
     HostStatus:
       type: object
       properties:
         name: { type: string }
+        nixos: { $ref: "#/components/schemas/NixOS" }
         reachable: { type: boolean }
         version: { type: string }
         uptime_seconds: { type: integer }
@@ -924,7 +974,7 @@ components:
           items:
             type: object
             properties:
-              name: { type: string, description: "hosts, units, vms, nodes, ceph, vips, disks, s3, tunnel, monitoring" }
+              name: { type: string, description: "hosts, units, vms, nodes, pods, ceph, vips, disks, s3, tunnel, monitoring" }
               status: { type: string, enum: [ok, warn, fail] }
               message: { type: string }
     Operation:

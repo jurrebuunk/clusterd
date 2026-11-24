@@ -70,6 +70,7 @@ func TestStatus(t *testing.T) {
 
 	c := New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.procRoot = fakeProc(t)
+	c.sysRoot = fakeSys(t)
 	c.interfaceAddrs = func() ([]net.Addr, error) {
 		return []net.Addr{&net.IPNet{IP: net.ParseIP("10.0.30.10"), Mask: net.CIDRMask(32, 32)}}, nil
 	}
@@ -79,6 +80,8 @@ func TestStatus(t *testing.T) {
 			return []byte(unitsJSON), nil
 		case "ceph":
 			return []byte(cephJSON), nil
+		case c.sysRoot + "/run/current-system/sw/bin/nixos-version":
+			return []byte(`{"nixosVersion":"26.05.1","configurationRevision":"abc123"}`), nil
 		}
 		return nil, errors.New("unexpected command " + name)
 	}
@@ -93,6 +96,12 @@ func TestStatus(t *testing.T) {
 	}
 	if !h["hv01"].Reachable || h["hv01"].UptimeSeconds != 3600 || h["hv01"].MemUsedPercent != 75 || h["hv01"].Load1 != 0.42 {
 		t.Fatalf("hv01 = %+v", h["hv01"])
+	}
+	if n := h["hv01"].NixOS; n == nil || n.Version != "26.05.1" || n.Revision != "abc123" || n.Generation != 27 || !n.RebootRequired {
+		t.Fatalf("hv01 nixos = %+v", n)
+	}
+	if h["hv02"].NixOS != nil {
+		t.Fatalf("hv02 reported no nixos, got %+v", h["hv02"].NixOS)
 	}
 	if !h["hv02"].Reachable || h["hv03"].Reachable || h["hv03"].Error == "" {
 		t.Fatalf("hv02 = %+v, hv03 = %+v", h["hv02"], h["hv03"])
@@ -156,4 +165,19 @@ func TestCephCacheCoalesces(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("stale cache not refreshed (calls %d)", calls)
 	}
+}
+
+// fakeSys is a /run and /nix/var with a switched system whose kernel differs
+// from the booted one, at generation 27.
+func fakeSys(t *testing.T) string {
+	dir := t.TempDir()
+	for _, p := range []string{"run", "sysA", "sysB", "nix/var/nix/profiles"} {
+		os.MkdirAll(filepath.Join(dir, p), 0o755)
+	}
+	os.Symlink(filepath.Join(dir, "sysA"), filepath.Join(dir, "run/current-system"))
+	os.Symlink(filepath.Join(dir, "sysB"), filepath.Join(dir, "run/booted-system"))
+	os.Symlink("/nix/store/k2/bzImage", filepath.Join(dir, "sysA/kernel"))
+	os.Symlink("/nix/store/k1/bzImage", filepath.Join(dir, "sysB/kernel"))
+	os.Symlink("system-27-link", filepath.Join(dir, "nix/var/nix/profiles/system"))
+	return dir
 }

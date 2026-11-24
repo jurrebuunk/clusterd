@@ -93,7 +93,9 @@ func apiServer(t *testing.T) (string, string) {
 		Timing: actions.Timing{Poll: 2 * time.Millisecond, DrainTimeout: time.Second, RestartTimeout: time.Second,
 			BootTimeout: time.Second, LockTTL: 5 * time.Second, Total: 5 * time.Second},
 		Run: fakeSystemctl(fake)}
-	s, err := server.New(cfg, auth.NewStore(tokens), status.NewWith(cfg, fake, log), eng, log)
+	col := status.NewWith(cfg, fake, log)
+	col.SetSysRoot(t.TempDir())
+	s, err := server.New(cfg, auth.NewStore(tokens), col, eng, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,6 +367,7 @@ func statusFixture(now time.Time) api.Status {
 	st := api.Status{
 		Hosts: []api.HostStatus{
 			{Name: "hv01", Reachable: true, Version: "1.0.0", UptimeSeconds: 3 * 86400, Load1: 0.5, MemUsedPercent: 31.6,
+				NixOS:  &api.NixOS{Version: "26.05", Revision: "54edb49c0ffee", RebootRequired: true},
 				Stores: []api.StoreHealth{{Name: "victoriametrics", OK: true}, {Name: "victorialogs", OK: false}}},
 			{Name: "hv02", Error: `unreachable: Get "https://x/v1/node": dial tcp: connect: connection refused`},
 		},
@@ -394,9 +397,9 @@ func TestStatusOutput(t *testing.T) {
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	var out, warn bytes.Buffer
 	printStatus(&out, &warn, statusFixture(now), now)
-	want := `HOST  STATUS       CLUSTERD  UPTIME  LOAD  MEM
-hv01  Up,LogsDown  1.0.0     3d      0.50  32%
-hv02  Unreachable  -         -       -     -
+	want := `HOST  STATUS                    CLUSTERD  COMMIT   UPTIME  LOAD  MEM
+hv01  Up,RebootNeeded,LogsDown  1.0.0     54edb49  3d      0.50  32%
+hv02  Unreachable               -         -        -       -     -
 
 VM  HOST  STATUS
 w1  hv01  Running

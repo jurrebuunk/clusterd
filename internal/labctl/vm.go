@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -286,7 +287,12 @@ func cmdHost(e *env) *cobra.Command {
 				status := hostState(h)
 				rows := [][2]string{{"Name", h.Name}, {"Status", status}}
 				if h.Reachable {
-					rows = append(rows, [2]string{"Clusterd", h.Version}, [2]string{"Uptime", age(time.Duration(h.UptimeSeconds) * time.Second)},
+					rows = append(rows, [2]string{"Clusterd", h.Version})
+					if n := h.NixOS; n != nil {
+						rows = append(rows, [2]string{"NixOS", n.Version}, [2]string{"Commit", n.Revision},
+							[2]string{"Generation", strconv.Itoa(n.Generation)}, [2]string{"Reboot needed", map[bool]string{true: "yes", false: "no"}[n.RebootRequired]})
+					}
+					rows = append(rows, [2]string{"Uptime", age(time.Duration(h.UptimeSeconds) * time.Second)},
 						[2]string{"Load", fmt.Sprintf("%.2f", h.Load1)}, [2]string{"Memory", fmt.Sprintf("%.0f%% used", h.MemUsedPercent)})
 					for _, s := range h.Stores {
 						rows = append(rows, [2]string{"Store " + s.Name, map[bool]string{true: "OK", false: "Down"}[s.OK]})

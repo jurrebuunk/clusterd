@@ -4,11 +4,13 @@ package kubefake
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/kube"
@@ -26,6 +28,7 @@ type Kube struct {
 	LeaseObj  *kube.Lease
 	RV        int
 	ReadyzErr error
+	FailPod   string // name of a pod that crash-loops (Pods)
 }
 
 func New() *Kube {
@@ -47,6 +50,27 @@ func New() *Kube {
 		{Namespace: "apps", Name: "job-done", UID: "u4", Phase: "Succeeded"},
 	}
 	return f
+}
+
+// Pods turns PodMap into the cluster's pod list: Running pods are ready,
+// FailPod names one that crash-loops.
+func (f *Kube) Pods(ctx context.Context) ([]api.Pod, error) {
+	f.Mu.Lock()
+	defer f.Mu.Unlock()
+	out := []api.Pod{}
+	for _, node := range slices.Sorted(maps.Keys(f.PodMap)) {
+		for _, p := range f.PodMap[node] {
+			ap := api.Pod{Namespace: p.Namespace, Name: p.Name, Node: node, Phase: p.Phase, Containers: 1, Created: time.Now().Add(-time.Hour)}
+			if p.Phase == "Running" {
+				ap.Ready = 1
+			}
+			if p.Name == f.FailPod {
+				ap.Ready, ap.Restarts, ap.Reason, ap.Failing = 0, 7, "CrashLoopBackOff", true
+			}
+			out = append(out, ap)
+		}
+	}
+	return out, nil
 }
 
 func (f *Kube) Nodes(ctx context.Context) ([]api.K3sNode, error) {

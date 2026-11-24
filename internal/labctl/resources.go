@@ -25,6 +25,45 @@ func listCmd[T any](e *env, short, path string, name func(T) string, table func(
 	}
 }
 
+func cmdPod(e *env) *cobra.Command {
+	c := group("pod", "Kubernetes pods")
+	var failing bool
+	list := &cobra.Command{
+		Use: "list", Aliases: []string{"ls"}, Short: "Pods of every namespace; --failing for the ones that need a look", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error {
+			path := "/v1/pods"
+			if failing {
+				path += "?failing=true"
+			}
+			var l api.List[api.Pod]
+			if err := e.get(path, &l); err != nil {
+				return err
+			}
+			return e.render(l, namesOf(l.Items, func(p api.Pod) string { return p.Namespace + "/" + p.Name }), func() error {
+				warnAll(e, "pods", l.Errors)
+				tw := newTable(e.stdout)
+				fmt.Fprintln(tw, "NAMESPACE\tPOD\tREADY\tSTATUS\tRESTARTS\tAGE\tNODE")
+				now := time.Now()
+				for _, p := range l.Items {
+					status := p.Phase
+					if p.Reason != "" {
+						status = p.Reason
+					}
+					restarts := strconv.Itoa(p.Restarts)
+					if p.LastRestart != nil {
+						restarts += " (" + age(now.Sub(*p.LastRestart)) + " ago)"
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%d/%d\t%s\t%s\t%s\t%s\n", p.Namespace, p.Name, p.Ready, p.Containers, status, restarts, age(now.Sub(p.Created)), p.Node)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+	list.Flags().BoolVar(&failing, "failing", false, "only pods that crash, wait, can't pull or restarted in the last hour")
+	c.AddCommand(list)
+	return c
+}
+
 func cmdCeph(e *env) *cobra.Command {
 	c := group("ceph", "Ceph: health and capacity")
 	c.AddCommand(&cobra.Command{

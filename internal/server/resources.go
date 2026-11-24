@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -63,6 +64,20 @@ func (s *Server) nodes(w http.ResponseWriter, r *http.Request) {
 		l.Errors = []string{"k3s API unreachable: " + k.Error}
 	}
 	writeJSON(w, http.StatusOK, l)
+}
+
+// pods lists Kubernetes pods; ?failing=true keeps only those that need a
+// look.
+func (s *Server) pods(w http.ResponseWriter, r *http.Request) {
+	pods, err := s.status.Pods(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, api.List[api.Pod]{Items: []api.Pod{}, Errors: []string{err.Error()}})
+		return
+	}
+	if flag(r, "failing") {
+		pods = slices.DeleteFunc(pods, func(p api.Pod) bool { return !p.Failing })
+	}
+	writeJSON(w, http.StatusOK, api.List[api.Pod]{Items: pods})
 }
 
 func (s *Server) buckets(w http.ResponseWriter, r *http.Request) {

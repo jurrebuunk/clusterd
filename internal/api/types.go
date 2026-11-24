@@ -34,7 +34,20 @@ type Node struct {
 	VIPs              []string      `json:"vips"`
 	VMs               []VMUnit      `json:"vms"`
 	Stores            []StoreHealth `json:"stores"`
+	NixOS             *NixOS        `json:"nixos,omitempty"`
 	Errors            []string      `json:"errors,omitempty"`
+}
+
+// NixOS is the system a host runs.
+type NixOS struct {
+	Version string `json:"version"`
+	// Revision is the git commit of the flake the system was built from
+	// (system.configurationRevision), "" when it wasn't set.
+	Revision   string `json:"revision,omitempty"`
+	Generation int    `json:"generation,omitempty"`
+	// RebootRequired: the running system's kernel, initrd or kernel modules
+	// differ from the booted one's.
+	RebootRequired bool `json:"reboot_required"`
 }
 
 // VMUnit is the systemd state of one microvm@ unit.
@@ -80,6 +93,7 @@ type HostStatus struct {
 	Load1          float64       `json:"load1"`
 	MemUsedPercent float64       `json:"mem_used_percent"`
 	Stores         []StoreHealth `json:"stores,omitempty"`
+	NixOS          *NixOS        `json:"nixos,omitempty"`
 	// Maintenance: the host's OSDs have Ceph's per-host noout flag.
 	Maintenance bool   `json:"maintenance"`
 	Error       string `json:"error,omitempty"`
@@ -119,6 +133,26 @@ type K3sNode struct {
 	Version     string   `json:"version"`
 	Zone        string   `json:"zone,omitempty"`
 	BootID      string   `json:"-"`
+}
+
+// Pod is one Kubernetes pod (GET /v1/pods).
+type Pod struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Node      string `json:"node"`
+	Phase     string `json:"phase"`
+	// Ready of Containers are ready.
+	Ready       int        `json:"ready"`
+	Containers  int        `json:"containers"`
+	Restarts    int        `json:"restarts"`
+	LastRestart *time.Time `json:"last_restart,omitempty"`
+	// Reason is why a container waits or the pod ended (CrashLoopBackOff,
+	// ImagePullBackOff, Evicted, …).
+	Reason  string    `json:"reason,omitempty"`
+	Created time.Time `json:"created"`
+	// Failing: Failed or Unknown, Pending or not ready for over 5 minutes, a
+	// container crash-looping or unable to pull, or restarted in the last hour.
+	Failing bool `json:"failing"`
 }
 
 // CephStatus is Ceph's health and raw capacity (GET /v1/ceph).

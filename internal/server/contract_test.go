@@ -169,6 +169,8 @@ func TestContractResponses(t *testing.T) {
 		{"GET", "/v1/vms/w1", "VMStatus"},
 		{"GET", "/v1/nodes", "NodeList"},
 		{"GET", "/v1/nodes/w1", "K3sNode"},
+		{"GET", "/v1/pods", "PodList"},
+		{"GET", "/v1/pods?failing=true", "PodList"},
 		{"GET", "/v1/ceph", "CephStatus"},
 		{"GET", "/v1/ceph/osds", "OSDList"},
 		{"GET", "/v1/disks", "DiskList"},

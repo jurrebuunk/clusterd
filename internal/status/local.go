@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -49,6 +50,11 @@ func (c *Collector) Node(ctx context.Context) api.Node {
 		n.VMs = vms
 	} else {
 		fail("vms", err)
+	}
+	if sys, err := c.nixos(ctx); err != nil {
+		fail("nixos", err)
+	} else if sys.Version != "" {
+		n.NixOS = &sys
 	}
 	self := c.cfg.Self()
 	n.Stores = []api.StoreHealth{
@@ -177,4 +183,47 @@ func (c *Collector) storeOK(ctx context.Context, base string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// nixos reads what system runs: nixos-version --json of the current system
+// (version, and the flake commit when system.configurationRevision is set),
+// the system profile's generation, and whether a reboot is needed to boot
+// into it. It only changes on a switch, so it is read again only then.
+func (c *Collector) nixos(ctx context.Context) (api.NixOS, error) {
+	cur, err := os.Readlink(c.sysRoot + "/run/current-system")
+	if errors.Is(err, os.ErrNotExist) {
+		return api.NixOS{}, nil // not NixOS
+	} else if err != nil {
+		return api.NixOS{}, err
+	}
+	c.nixosMu.Lock()
+	defer c.nixosMu.Unlock()
+	if cur == c.nixosKey {
+		return c.nixosVal, nil
+	}
+	out, err := c.run(ctx, c.sysRoot+"/run/current-system/sw/bin/nixos-version", "--json")
+	if err != nil {
+		return api.NixOS{}, err
+	}
+	var v struct {
+		Version  string `json:"nixosVersion"`
+		Revision string `json:"configurationRevision"`
+	}
+	if err := json.Unmarshal(out, &v); err != nil {
+		return api.NixOS{}, fmt.Errorf("nixos-version: %w", err)
+	}
+	n := api.NixOS{Version: v.Version, Revision: v.Revision}
+	if p, err := os.Readlink(c.sysRoot + "/nix/var/nix/profiles/system"); err == nil {
+		g := strings.TrimSuffix(strings.TrimPrefix(p, "system-"), "-link")
+		n.Generation, _ = strconv.Atoi(g)
+	}
+	for _, part := range []string{"kernel", "initrd", "kernel-modules"} {
+		b, errB := os.Readlink(c.sysRoot + "/run/booted-system/" + part)
+		r, errC := os.Readlink(c.sysRoot + "/run/current-system/" + part)
+		if errB == nil && errC == nil && b != r {
+			n.RebootRequired = true
+		}
+	}
+	c.nixosKey, c.nixosVal = cur, n
+	return n, nil
 }

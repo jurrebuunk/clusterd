@@ -71,7 +71,9 @@ func newActionHarness(t *testing.T) *actionHarness {
 			return nil, nil
 		},
 	}
-	s, err := New(cfg, auth.NewStore(parsed), status.NewWith(cfg, h.fake, log), eng, log)
+	col := status.NewWith(cfg, h.fake, log)
+	col.SetSysRoot(t.TempDir())
+	s, err := New(cfg, auth.NewStore(parsed), col, eng, log)
 	if err != nil {
 		t.Fatal(err)
 	}

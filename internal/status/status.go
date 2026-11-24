@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,9 +21,11 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/kube"
 )
 
-// NodeLister lists Kubernetes nodes (*kube.Client, or a fake in tests).
+// NodeLister lists Kubernetes nodes and pods (*kube.Client, or a fake in
+// tests).
 type NodeLister interface {
 	Nodes(ctx context.Context) ([]api.K3sNode, error)
+	Pods(ctx context.Context) ([]api.Pod, error)
 }
 
 // Collector answers /v1/internal/node, /v1/status and the collections.
@@ -35,9 +38,14 @@ type Collector struct {
 
 	// Overridable in tests.
 	procRoot       string
+	sysRoot        string // prefix for /run and /nix/var (tests)
 	run            func(ctx context.Context, name string, args ...string) ([]byte, error)
 	interfaceAddrs func() ([]net.Addr, error)
 	now            func() time.Time
+
+	nixosMu  sync.Mutex
+	nixosKey string // /run/current-system's target when nixosVal was read
+	nixosVal api.NixOS
 
 	// Ceph health is slow to ask (the CLI takes about half a second), so it is
 	// refreshed in the background and /v1/status answers from this copy.
@@ -87,6 +95,10 @@ func NewWith(cfg *config.Config, nl NodeLister, log *slog.Logger) *Collector {
 	}
 }
 
+// SetSysRoot makes the collector read /run and /nix/var under dir: for
+// tests, which must not see the machine they run on.
+func (c *Collector) SetSysRoot(dir string) { c.sysRoot = dir }
+
 // nodeFacts asks every host for its /v1/internal/node (this one locally), in parallel.
 // token is the caller's own bearer token: peers only answer callers they
 // would answer themselves, and no extra credential is needed between hosts.
@@ -130,6 +142,7 @@ func (c *Collector) hostStatuses(nodes map[string]*api.Node, errs map[string]err
 				hs.MemUsedPercent = round1(100 * float64(n.MemTotalBytes-n.MemAvailableBytes) / float64(n.MemTotalBytes))
 			}
 			hs.Stores = n.Stores
+			hs.NixOS = n.NixOS
 			hs.Error = strings.Join(n.Errors, "; ")
 		} else if err := errs[h.Name]; err != nil {
 			hs.Error = err.Error()
@@ -281,6 +294,16 @@ func (c *Collector) k3s(ctx context.Context) api.K3sStatus {
 		return api.K3sStatus{Nodes: []api.K3sNode{}, Error: err.Error()}
 	}
 	return api.K3sStatus{Reachable: true, Nodes: nodes}
+}
+
+// Pods lists every pod (GET /v1/pods).
+func (c *Collector) Pods(ctx context.Context) ([]api.Pod, error) {
+	if c.kube == nil {
+		return nil, errors.New("k3s API not configured")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return c.kube.Pods(ctx)
 }
 
 type cephStatus struct {

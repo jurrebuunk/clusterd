@@ -63,7 +63,10 @@ func (c *Collector) Checks(ctx context.Context, token string) api.Checks {
 	var metErr error
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var pods []api.Pod
+	var podsErr error
 	wg.Go(func() { st = c.Status(ctx, token) })
+	wg.Go(func() { pods, podsErr = c.Pods(ctx) })
 	for name, q := range map[string]string{
 		"failed": `node_systemd_unit_state{state="failed"} == 1`,
 		"probes": `probe_success == 0`,
@@ -89,9 +92,11 @@ func (c *Collector) Checks(ctx context.Context, token string) api.Checks {
 	var l checkList
 	f := func() map[string][]string { return map[string][]string{} }
 
-	// Hosts: reachable, stores, one clusterd version, maintenance.
+	// Hosts: reachable, stores, one clusterd version, one commit, reboots,
+	// maintenance.
 	h := f()
 	versions := map[string]bool{}
+	revisions := map[string]bool{}
 	inMaint := map[string]bool{}
 	for _, hs := range st.Hosts {
 		switch {
@@ -109,6 +114,17 @@ func (c *Collector) Checks(ctx context.Context, token string) api.Checks {
 		if hs.Version != "" {
 			versions[hs.Version] = true
 		}
+		if n := hs.NixOS; n != nil {
+			if n.Revision != "" {
+				revisions[shortRev(n.Revision)] = true
+			}
+			if n.RebootRequired {
+				h[api.CheckWarn] = append(h[api.CheckWarn], hs.Name+" needs a reboot (new kernel)")
+			}
+		}
+	}
+	if len(revisions) > 1 {
+		h[api.CheckWarn] = append(h[api.CheckWarn], "hosts run different commits: "+strings.Join(sortedSet(revisions), ", "))
 	}
 	if len(versions) > 1 {
 		var vs []string
@@ -155,6 +171,30 @@ func (c *Collector) Checks(ctx context.Context, token string) api.Checks {
 		}
 	}
 	l.add("nodes", n)
+
+	// Pods: only when k3s answers; the nodes check reports it otherwise.
+	pd := f()
+	switch {
+	case podsErr != nil && st.K3s.Reachable:
+		pd[api.CheckWarn] = append(pd[api.CheckWarn], "pods: "+podsErr.Error())
+	case podsErr == nil:
+		var bad []string
+		for _, p := range pods {
+			if p.Failing {
+				why := p.Reason
+				if why == "" {
+					why = p.Phase
+				}
+				bad = append(bad, p.Namespace+"/"+p.Name+" ("+why+")")
+			}
+		}
+		if len(bad) > 3 {
+			bad = append(bad[:3], fmt.Sprintf("and %d more", len(bad)-3))
+		}
+		pd[api.CheckWarn] = bad
+		pd["info"] = []string{fmt.Sprintf("%d pods", len(pods))}
+	}
+	l.add("pods", pd)
 
 	cp := f()
 	switch {
@@ -263,5 +303,27 @@ func (c *Collector) Checks(ctx context.Context, token string) api.Checks {
 			out.Status = ch.Status
 		}
 	}
+	return out
+}
+
+// shortRev shortens a git commit like git log --oneline; a dirty tree keeps
+// its "-dirty".
+func shortRev(r string) string {
+	base, dirty := strings.CutSuffix(r, "-dirty")
+	if len(base) > 7 {
+		base = base[:7]
+	}
+	if dirty {
+		base += "-dirty"
+	}
+	return base
+}
+
+func sortedSet(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }

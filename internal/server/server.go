@@ -118,6 +118,7 @@ func (s *Server) routes() []route {
 		{"GET /v1/nodes/{name}", "node", auth.ScopeRead, false, s.nodes},
 		{"POST /v1/nodes/{name}/cordon", "node_cordon", auth.ScopeOperator, false, s.nodeCordon(true)},
 		{"POST /v1/nodes/{name}/uncordon", "node_uncordon", auth.ScopeOperator, false, s.nodeCordon(false)},
+		{"GET /v1/pods", "pods", auth.ScopeRead, false, s.pods},
 		{"GET /v1/ceph", "ceph", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, s.status.Ceph(r.Context()))
 		}},

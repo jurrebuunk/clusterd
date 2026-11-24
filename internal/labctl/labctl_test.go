@@ -116,13 +116,13 @@ func TestEndToEnd(t *testing.T) {
 	t.Setenv("LABCTL_SITE", "")
 	url, tok := apiServer(t)
 
-	if code, _, _ := run(t, "", "whoami", "--site", "lab"); code != ExitUsage {
+	if code, _, _ := run(t, "", "auth", "status", "--site", "lab"); code != ExitUsage {
 		t.Fatalf("unknown site: exit %d", code)
 	}
-	if code, _, _ := run(t, "lab_wrong\n", "login", "--site", "lab", "--api", url); code != ExitAuth {
+	if code, _, _ := run(t, "lab_wrong\n", "auth", "login", "--site", "lab", "--api", url); code != ExitAuth {
 		t.Fatalf("login with a bad token: exit %d", code)
 	}
-	code, out, errs := run(t, tok+"\n", "login", "--site", "lab", "--api", url)
+	code, out, errs := run(t, tok+"\n", "auth", "login", "--site", "lab", "--api", url)
 	if code != 0 || !strings.Contains(out, "as tester (manage)") {
 		t.Fatalf("login: %d %q %q", code, out, errs)
 	}
@@ -131,19 +131,46 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("token file: %v %v", fi, err)
 	}
 	// hgd1 (built-in) and lab exist; switch to lab.
-	if code, _, _ := run(t, "", "use", "lab"); code != 0 {
-		t.Fatal("use lab failed")
+	if code, _, _ := run(t, "", "site", "use", "lab"); code != 0 {
+		t.Fatal("site use lab failed")
 	}
-	if code, out, _ := run(t, "", "whoami"); code != 0 || !strings.Contains(out, "tester") {
-		t.Fatalf("whoami: %d %q", code, out)
+	if code, out, _ := run(t, "", "site", "list", "-o", "name"); code != 0 || out != "hgd1\nlab\n" {
+		t.Fatalf("site list: %d %q", code, out)
 	}
-	if code, out, _ := run(t, "", "--json", "status"); code != 0 || !strings.Contains(out, `"site": "lab"`) {
-		t.Fatalf("status --json: %d %q", code, out)
+	if code, out, _ := run(t, "", "auth", "status"); code != 0 || !strings.Contains(out, "tester") {
+		t.Fatalf("auth status: %d %q", code, out)
 	}
-	for _, sec := range []string{"ceph", "vm", "nodes"} {
-		if code, out, errs := run(t, "", "status", sec); code != 0 || strings.HasPrefix(out, "HOST") {
-			t.Fatalf("status %s: %d %q %q", sec, code, out, errs)
+	if code, out, _ := run(t, "", "-o", "json", "status"); code != 0 || !strings.Contains(out, `"site": "lab"`) {
+		t.Fatalf("status -o json: %d %q", code, out)
+	}
+	// Every resource lists; global flags go anywhere on the line.
+	for _, c := range [][]string{{"host", "list"}, {"vm", "ls"}, {"node", "list"}, {"ceph", "status"}, {"osd", "list"},
+		{"disk", "list"}, {"fs", "list"}, {"vip", "list"}, {"s3", "status"}, {"s3", "bucket", "list"}, {"op", "list"}} {
+		if code, out, errs := run(t, "", c...); code != 0 || out == "" {
+			t.Fatalf("%v: %d %q %q", c, code, out, errs)
 		}
+	}
+	if code, out, _ := run(t, "", "vm", "list", "-o", "name"); code != 0 || out != "m1\nm2\nm3\nw1\n" {
+		t.Fatalf("vm list -o name: %d %q", code, out)
+	}
+	if code, out, _ := run(t, "", "vm", "show", "w1"); code != 0 || !strings.Contains(out, "State:") {
+		t.Fatalf("vm show: %d %q", code, out)
+	}
+	if code, _, errs := run(t, "", "vm", "show", "nope"); code != ExitAPI || !strings.Contains(errs, `no VM "nope"`) {
+		t.Fatalf("vm show nope: %d %q", code, errs)
+	}
+	if code, out, _ := run(t, "", "node", "show", "w1", "-o", "json"); code != 0 || !strings.Contains(out, `"name": "w1"`) {
+		t.Fatalf("node show: %d %q", code, out)
+	}
+	// Help everywhere; unknown verbs suggest the closest.
+	if code, out, _ := run(t, "", "vm", "--help"); code != 0 || !strings.Contains(out, "roll") {
+		t.Fatalf("vm --help: %d %q", code, out)
+	}
+	if code, _, errs := run(t, "", "vm", "stpo", "w1"); code != ExitUsage || !strings.Contains(errs, "did you mean stop") {
+		t.Fatalf("typo: %d %q", code, errs)
+	}
+	if code, _, _ := run(t, "", "-o", "yaml", "vm", "list"); code != ExitUsage {
+		t.Fatalf("-o yaml: %d", code)
 	}
 	if code, out, _ := run(t, "", "status"); code != 0 || !strings.HasPrefix(out, "HOST") {
 		t.Fatalf("status: %d %q", code, out)
@@ -198,36 +225,63 @@ func TestEndToEnd(t *testing.T) {
 	}
 	run(t, "", "node", "uncordon", "m2")
 
-	// Health: no Kubernetes for the collector in this test, so nodes fail.
+	// Without waiting: the operation, named.
+	if code, out, errs := run(t, "", "vm", "restart", "w1", "--yes", "--no-wait"); code != 0 || !strings.HasPrefix(out, "operation/") {
+		t.Fatalf("--no-wait: %d %q %q", code, out, errs)
+	}
+	waitUnlocked(t)
+
+	// Health: the fake has no monitoring data, so some areas fail.
 	if code, out, _ := run(t, "", "health"); code != ExitUnhealthy || !strings.HasPrefix(out, "CHECK") || !strings.Contains(out, "nodes") {
 		t.Fatalf("health: %d %q", code, out)
 	}
 
 	// Environment overrides.
 	t.Setenv("LABCTL_TOKEN", "lab_wrong")
-	if code, _, _ := run(t, "", "whoami"); code != ExitAuth {
+	if code, _, _ := run(t, "", "auth", "status"); code != ExitAuth {
 		t.Fatalf("LABCTL_TOKEN: exit %d", code)
 	}
 	t.Setenv("LABCTL_TOKEN", "")
 	t.Setenv("LABCTL_API", "http://127.0.0.1:1")
-	if code, _, errs := run(t, "", "whoami"); code != ExitUnreachable || !strings.Contains(errs, "WARP") {
+	if code, _, errs := run(t, "", "auth", "status"); code != ExitUnreachable || !strings.Contains(errs, "WARP") {
 		t.Fatalf("unreachable: exit %d %q", code, errs)
 	}
 	t.Setenv("LABCTL_API", "")
 
 	// A site without a token.
-	if code, _, _ := run(t, "", "--site", "hgd1", "whoami"); code != ExitAuth {
+	if code, _, _ := run(t, "", "--site", "hgd1", "auth", "status"); code != ExitAuth {
 		t.Fatalf("no token: exit %d", code)
 	}
 	if code, _, _ := run(t, "", "bogus"); code != ExitUsage {
 		t.Fatalf("unknown command: exit %d", code)
 	}
+	if code, _, _ := run(t, "", "vm", "list", "--bogus"); code != ExitUsage {
+		t.Fatalf("unknown flag: exit %d", code)
+	}
+	if code, _, _ := run(t, "", "auth", "logout"); code != 0 {
+		t.Fatal("logout")
+	}
+	if code, _, _ := run(t, "", "auth", "status"); code != ExitAuth {
+		t.Fatal("still logged in")
+	}
+}
+
+// waitUnlocked waits until an action started without --wait is done.
+func waitUnlocked(t *testing.T) {
+	t.Helper()
+	for range 100 {
+		if code, _, errs := run(t, "", "vm", "restart", "m1", "--dry-run"); code == 0 && !strings.Contains(errs, "busy") {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the action never finished")
 }
 
 func TestTokenNew(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	out := filepath.Join(t.TempDir(), "tok")
-	code, stdout, _ := run(t, "", "token", "new", "--name", "ui", "--scope", "operator", "--out", out)
+	code, stdout, _ := run(t, "", "auth", "token", "create", "--name", "ui", "--scope", "operator", "--out", out)
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
@@ -242,7 +296,7 @@ func TestTokenNew(t *testing.T) {
 	if got, ok := auth.NewStore(parsed).Lookup(tok); !ok || got.Scope != auth.ScopeOperator {
 		t.Fatal("hash line does not match the token")
 	}
-	if code, _, _ := run(t, "", "token", "new", "--name", "ui", "--scope", "admin"); code != ExitUsage {
+	if code, _, _ := run(t, "", "auth", "token", "create", "--name", "ui", "--scope", "admin"); code != ExitUsage {
 		t.Fatal("bad scope accepted")
 	}
 }
@@ -329,7 +383,7 @@ func statusFixture(now time.Time) api.Status {
 		},
 		S3: api.S3Status{Endpoint: "https://s3.test", Users: 2, Objects: 50, SizeBytes: 3e9, CertExpires: &exp,
 			Gateways: []api.S3Gateway{{Host: "hv01", Up: true}, {Host: "hv02", Up: true}},
-			Buckets:  []api.S3Bucket{{Name: "backups", Owner: "app", Objects: 40, SizeBytes: 2e9, QuotaBytes: 4e9}, {Name: "media", Owner: "jurre", Objects: 10, SizeBytes: 1e9}},
+			Buckets:  2,
 			Pool:     api.S3Pool{StoredBytes: 3e9, MaxAvailBytes: 297e9, UsedPercent: 1}},
 	}
 	st.K3s.Nodes[0].Schedulable = false
@@ -367,10 +421,6 @@ FILESYSTEM  HOST  DEVICE          SIZE  USED  FULL
 
 S3       GATEWAYS  USERS  BUCKETS  OBJECTS  STORED  ROOM  FULL  CERT
 s3.test  2/2       2      2        50       3.0G    297G  1%    80d
-
-BUCKET   OWNER  OBJECTS  SIZE  QUOTA  FULL
-backups  app    40       2.0G  4.0G   50%
-media    jurre  10       1.0G  -      -
 `
 	if got := out.String(); got != want {
 		t.Errorf("status output:\n%s\nwant:\n%s", got, want)
@@ -402,12 +452,15 @@ func TestCompletion(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, sh := range []string{"bash", "zsh", "fish"} {
 		code, out, _ := run(t, "", "completion", sh)
-		if code != 0 || !strings.Contains(out, "vm") || strings.Contains(out, "COMMANDS") {
+		if code != 0 || !strings.Contains(out, "labctl") {
 			t.Errorf("%s: %d %q", sh, code, out[:min(len(out), 80)])
 		}
 	}
-	if code, out, _ := run(t, "", "__complete", "sites"); code != 0 || strings.TrimSpace(out) != "hgd1" {
+	if code, out, _ := run(t, "", "__complete", "site", "use", ""); code != 0 || !strings.HasPrefix(out, "hgd1\n") {
 		t.Errorf("sites: %q", out)
+	}
+	if code, out, _ := run(t, "", "__complete", "v"); code != 0 || !strings.Contains(out, "vm\t") || !strings.Contains(out, "vip\t") {
+		t.Errorf("commands: %q", out)
 	}
 }
 

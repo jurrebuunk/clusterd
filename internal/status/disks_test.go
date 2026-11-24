@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jurrebuunk/clusterd/internal/api"
 
 	"github.com/jurrebuunk/clusterd/internal/config"
 	"github.com/jurrebuunk/clusterd/internal/fakestore"
@@ -93,19 +96,19 @@ func TestOSDCache(t *testing.T) {
 }
 
 func TestS3(t *testing.T) {
-	st := fakeCollector(t).S3(context.Background())
+	st, buckets := fakeCollector(t).S3(context.Background())
 	if len(st.Errors) > 0 {
 		t.Fatalf("errors: %v", st.Errors)
 	}
-	if st.Users != 2 || len(st.Buckets) != 2 || st.Objects != 51 || st.SizeBytes != 3e9 {
+	if st.Users != 2 || st.Buckets != 2 || len(buckets) != 2 || st.Objects != 51 || st.SizeBytes != 3e9 {
 		t.Fatalf("s3 = %+v", st)
 	}
-	b := st.Buckets[0]
+	b := buckets[0]
 	if b.Name != "backups" || b.QuotaBytes != 4e9 || b.QuotaObjects != 0 || b.Created == nil {
 		t.Errorf("bucket = %+v", b)
 	}
-	if st.Buckets[1].QuotaBytes != 0 {
-		t.Errorf("disabled quota counted: %+v", st.Buckets[1])
+	if buckets[1].QuotaBytes != 0 {
+		t.Errorf("disabled quota counted: %+v", buckets[1])
 	}
 	if len(st.Gateways) != 2 || !st.Gateways[0].Up || st.Gateways[1].Up {
 		t.Errorf("gateways = %+v", st.Gateways)
@@ -121,7 +124,7 @@ func TestS3(t *testing.T) {
 func TestS3NotConfigured(t *testing.T) {
 	c := fakeCollector(t)
 	c.cfg.S3.Credentials = ""
-	st := c.S3(context.Background())
+	st, _ := c.S3(context.Background())
 	if len(st.Errors) != 1 || !strings.Contains(st.Errors[0], "not configured") || len(st.Gateways) != 2 {
 		t.Fatalf("s3 = %+v", st)
 	}
@@ -158,5 +161,45 @@ func TestChecks(t *testing.T) {
 	}
 	if !strings.Contains(msg["hosts"], "hv01 in maintenance") || !strings.Contains(msg["units"], "hv01 broken.service") {
 		t.Errorf("messages: %v", msg)
+	}
+}
+
+func TestOperations(t *testing.T) {
+	c := fakeCollector(t)
+	c.now = func() time.Time { return time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC) }
+	ops, err := c.Operations(context.Background(), 24*time.Hour, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) != 3 {
+		t.Fatalf("ops = %+v", ops)
+	}
+	// Newest first; events only on a single operation.
+	if ops[0].ID != "cccccccccccccccc" || ops[0].State != api.OpRunning || ops[0].Finished != nil {
+		t.Errorf("running = %+v", ops[0])
+	}
+	if ops[1].State != api.OpFailed || ops[1].Error != "drain timed out" || ops[1].Host != "hv02" {
+		t.Errorf("failed = %+v", ops[1])
+	}
+	if ops[2].State != api.OpSucceeded || ops[2].Action != "vm restart" || ops[2].Events != nil {
+		t.Errorf("ok = %+v", ops[2])
+	}
+
+	op, err := c.Operation(context.Background(), "aaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(op.Events) != 2 || op.Events[0].Message != "node/w1 cordoned" || op.Events[1].Status != api.EventDone || op.Finished == nil {
+		t.Errorf("op = %+v", op)
+	}
+	if _, err := c.Operation(context.Background(), "../etc"); err != ErrNoOperation {
+		t.Errorf("bad id: %v", err)
+	}
+
+	// A start older than an action may run without an end is lost.
+	c.now = func() time.Time { return time.Date(2026, 11, 20, 14, 0, 0, 0, time.UTC) }
+	ops, _ = c.Operations(context.Background(), 24*time.Hour, "hv01", 0)
+	if len(ops) != 1 || ops[0].State != api.OpUnknown {
+		t.Errorf("target filter / unknown = %+v", ops)
 	}
 }

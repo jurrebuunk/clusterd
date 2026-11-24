@@ -2,14 +2,13 @@ package labctl
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
-	"text/tabwriter"
 
+	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/jurrebuunk/clusterd/internal/api"
@@ -18,23 +17,43 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/version"
 )
 
-func (e *env) printJSON(v any) error {
-	enc := json.NewEncoder(e.stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+func cmdAuth(e *env) *cobra.Command {
+	c := group("auth", "Log in, log out, see the token in use, make new tokens")
+	var apiFlag, tokenFile string
+	login := &cobra.Command{
+		Use: "login", Short: "Store and check a token for the site (--site)", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error { return e.login(apiFlag, tokenFile) },
+	}
+	login.Flags().StringVar(&apiFlag, "api", "", "API URL for this site (default: the site's current one)")
+	login.Flags().StringVar(&tokenFile, "token-file", "", "read the token from this file instead of asking")
+	logout := &cobra.Command{
+		Use: "logout", Short: "Forget the site's token", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error {
+			path, err := e.cfg.tokenFile(e.site)
+			if err != nil {
+				return err
+			}
+			if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
+				return usageErr("no token stored for site %s", e.site)
+			} else if err != nil {
+				return err
+			}
+			fmt.Fprintf(e.stdout, "Logged out of %s.\n", e.site)
+			return nil
+		},
+	}
+	status := &cobra.Command{
+		Use: "status", Short: "The site, token name and scope, and which server answered", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error { return e.whoami() },
+	}
+	token := group("token", "API tokens")
+	token.AddCommand(cmdTokenCreate(e))
+	c.AddCommand(login, logout, status, token)
+	return c
 }
 
-func cmdLogin(e *env, args []string) error {
-	fs := newFlags(e, "login")
-	apiFlag := fs.String("api", "", "API URL for this site (default: the site's current one)")
-	tokenFile := fs.String("token-file", "", "read the token from this file instead of asking")
-	if pos, err := parseArgs(fs, args); err != nil {
-		return err
-	} else if len(pos) > 0 {
-		return usageErr("login takes no arguments; use --site to pick the site")
-	}
-
-	api := *apiFlag
+func (e *env) login(apiFlag, tokenFile string) error {
+	api := apiFlag
 	if api == "" {
 		if s, ok := e.cfg.Sites[e.site]; ok {
 			api = s.API
@@ -46,8 +65,8 @@ func cmdLogin(e *env, args []string) error {
 	var token string
 	var err error
 	switch {
-	case *tokenFile != "":
-		token, err = readToken(*tokenFile)
+	case tokenFile != "":
+		token, err = readToken(tokenFile)
 	case isTerminal(e.stdin):
 		fmt.Fprintf(e.stderr, "Token for %s (%s): ", e.site, api)
 		var b []byte
@@ -102,37 +121,50 @@ func isTerminal(r io.Reader) bool {
 	return ok && term.IsTerminal(int(f.Fd()))
 }
 
-func cmdUse(e *env, args []string) error {
-	if len(args) > 1 {
-		return usageErr("usage: labctl use [site]")
-	}
-	if len(args) == 0 {
-		tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "CURRENT\tNAME\tAPI")
-		for _, n := range e.cfg.siteNames() {
-			mark := ""
-			if n == e.cfg.Current {
-				mark = "*"
+func cmdSite(e *env) *cobra.Command {
+	c := group("site", "Sites labctl knows, and which one is current")
+	c.AddCommand(&cobra.Command{
+		Use: "list", Aliases: []string{"ls"}, Short: "Known sites; * marks the current one", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error {
+			names := e.cfg.siteNames()
+			return e.render(e.cfg, names, func() error {
+				tw := newTable(e.stdout)
+				fmt.Fprintln(tw, "CURRENT\tNAME\tAPI")
+				for _, n := range names {
+					mark := ""
+					if n == e.cfg.Current {
+						mark = "*"
+					}
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", mark, n, e.cfg.Sites[n].API)
+				}
+				return tw.Flush()
+			})
+		},
+	})
+	c.AddCommand(&cobra.Command{
+		Use: "use SITE", Short: "Make SITE the current site", Args: args(1, "SITE"),
+		ValidArgsFunction: func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+			if e.load() != nil {
+				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", mark, n, e.cfg.Sites[n].API)
-		}
-		return tw.Flush()
-	}
-	if _, ok := e.cfg.Sites[args[0]]; !ok {
-		return usageErr("unknown site %q; add it with labctl login --site %s --api URL", args[0], args[0])
-	}
-	e.cfg.Current = args[0]
-	if err := e.cfg.save(); err != nil {
-		return err
-	}
-	fmt.Fprintf(e.stdout, "Switched to site %q.\n", args[0])
-	return nil
+			return e.cfg.siteNames(), cobra.ShellCompDirectiveNoFileComp
+		},
+		RunE: func(_ *cobra.Command, a []string) error {
+			if _, ok := e.cfg.Sites[a[0]]; !ok {
+				return usageErr("unknown site %q; add it with labctl auth login --site %s --api URL", a[0], a[0])
+			}
+			e.cfg.Current = a[0]
+			if err := e.cfg.save(); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.stdout, "Switched to site %q.\n", a[0])
+			return nil
+		},
+	})
+	return c
 }
 
-func cmdWhoami(e *env, args []string) error {
-	if len(args) > 0 {
-		return usageErr("whoami takes no arguments")
-	}
+func (e *env) whoami() error {
 	c, err := e.client()
 	if err != nil {
 		return err
@@ -141,16 +173,23 @@ func cmdWhoami(e *env, args []string) error {
 	if err != nil {
 		return err
 	}
-	if e.json {
+	if e.json() {
 		return e.printJSON(w)
 	}
-	tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
+	tw := newTable(e.stdout)
 	fmt.Fprintln(tw, "NAME\tSCOPE\tSITE\tSERVER")
 	fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", w.Name, w.Scope, w.Site, w.Host)
 	return tw.Flush()
 }
 
-func cmdVersion(e *env, args []string) error {
+func cmdVersion(e *env) *cobra.Command {
+	return &cobra.Command{
+		Use: "version", Short: "Show labctl's and the server's version", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error { return e.version() },
+	}
+}
+
+func (e *env) version() error {
 	out := map[string]string{"labctl": version.Version, "commit": version.Commit}
 	c, err := e.client()
 	if err == nil {
@@ -160,7 +199,7 @@ func cmdVersion(e *env, args []string) error {
 			out["served_by"] = w.Host
 		}
 	}
-	if e.json {
+	if e.json() {
 		return e.printJSON(out)
 	}
 	fmt.Fprintf(e.stdout, "Client Version: %s\n", version.Version)
@@ -172,23 +211,25 @@ func cmdVersion(e *env, args []string) error {
 	return nil
 }
 
-func cmdToken(e *env, args []string) error {
-	if len(args) == 0 || args[0] != "new" {
-		return usageErr("usage: labctl token new --name N --scope read|operator|manage [--out FILE]")
+func cmdTokenCreate(e *env) *cobra.Command {
+	var name, scope, out string
+	c := &cobra.Command{
+		Use: "create", Short: "Generate a token and the line for the hosts' token file (offline)", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error { return e.tokenCreate(name, scope, out) },
 	}
-	fs := newFlags(e, "token new")
-	name := fs.String("name", "", "token name, shown in logs (e.g. laptop-jurre)")
-	scopeFlag := fs.String("scope", "", "read, operator or manage")
-	out := fs.String("out", "", "write the token to this file (mode 600) instead of printing it")
-	if pos, err := parseArgs(fs, args[1:]); err != nil {
-		return err
-	} else if len(pos) > 0 {
-		return usageErr("unexpected argument %q", pos[0])
-	}
-	if !auth.ValidName(*name) {
+	c.Flags().StringVar(&name, "name", "", "token name, shown in logs (e.g. laptop-jurre)")
+	c.Flags().StringVar(&scope, "scope", "", "read, operator or manage")
+	c.Flags().StringVar(&out, "out", "", "write the token to this file (mode 600) instead of printing it")
+	c.RegisterFlagCompletionFunc("scope", fixed("read", "operator", "manage"))
+	return c
+}
+
+func (e *env) tokenCreate(name, scopeFlag, outFile string) error {
+	out := &outFile
+	if !auth.ValidName(name) {
 		return usageErr("--name must be lowercase letters, digits, '.', '_' or '-'")
 	}
-	scope, err := auth.ParseScope(*scopeFlag)
+	scope, err := auth.ParseScope(scopeFlag)
 	if err != nil {
 		return usageErr("--scope: %v", err)
 	}
@@ -196,7 +237,7 @@ func cmdToken(e *env, args []string) error {
 	if err != nil {
 		return err
 	}
-	line := auth.HashLine(*name, scope, tok)
+	line := auth.HashLine(name, scope, tok)
 	if *out != "" {
 		f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {

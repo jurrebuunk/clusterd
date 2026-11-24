@@ -17,7 +17,7 @@ buildGoModule {
       ../api # the contract test checks the server against it
     ];
   };
-  vendorHash = "sha256-F6WucqRB14LsXuPOPYlbRfS0Voex3YJVoaWw3X3Mgbk=";
+  vendorHash = "sha256-sJVUlJ6sBKW3TXZAUDjeMxEgaVdcdRirdy/Df/1z1H4=";
   subPackages = [ "cmd/${name}" ];
   env.CGO_ENABLED = 0;
   ldflags = [

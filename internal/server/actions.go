@@ -26,10 +26,10 @@ func peerClient(cfg *config.Config) *http.Client {
 	}}
 }
 
-// vmAction serves restart, stop and start: ?dry_run=1 returns the plan;
-// otherwise the action runs and its progress streams back as JSON lines. A
-// request for a VM on another host is passed to that host's clusterd with
-// the caller's token.
+// vmAction serves restart, stop and start. ?dry_run=true returns the plan;
+// otherwise the action starts and the answer is its operation (202), or with
+// ?wait=true its progress as JSON lines. A request for a VM on another host
+// is passed to that host's clusterd with the caller's token.
 func (s *Server) vmAction(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.actions == nil {
@@ -47,7 +47,7 @@ func (s *Server) vmAction(kind string) http.HandlerFunc {
 			return
 		}
 		caller := s.caller(w, r)
-		if dry, _ := strconv.ParseBool(r.URL.Query().Get("dry_run")); dry {
+		if flag(r, "dry_run") {
 			var plan any
 			switch kind {
 			case "restart":
@@ -77,7 +77,7 @@ func (s *Server) vmAction(kind string) http.HandlerFunc {
 			s.actionError(w, err)
 			return
 		}
-		s.stream(w, run)
+		s.started(w, r, run, caller)
 	}
 }
 
@@ -101,10 +101,9 @@ func (s *Server) hostAction(kind string) http.HandlerFunc {
 			s.forwardTo(w, r, host, host)
 			return
 		}
-		q := r.URL.Query()
-		reboot, _ := strconv.ParseBool(q.Get("reboot"))
+		reboot := flag(r, "reboot")
 		caller := s.caller(w, r)
-		if dry, _ := strconv.ParseBool(q.Get("dry_run")); dry {
+		if flag(r, "dry_run") {
 			var plan any
 			var err error
 			if kind == "maintenance" {
@@ -135,24 +134,57 @@ func (s *Server) hostAction(kind string) http.HandlerFunc {
 			run.Wait()
 			s.status.Invalidate()
 		}()
-		s.stream(w, run)
+		s.started(w, r, run, caller)
 	}
 }
 
-// nodeCordon cordons or uncordons a node; no forwarding, no lock.
+// nodeCordon cordons or uncordons a node; no forwarding, no lock. It is done
+// when it answers, so the operation comes back finished (200).
 func (s *Server) nodeCordon(cordon bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.actions == nil {
 			writeError(w, http.StatusServiceUnavailable, "actions need Kubernetes access, which is not configured")
 			return
 		}
-		msg, err := s.actions.SetCordon(r.Context(), r.PathValue("name"), cordon, s.caller(w, r))
+		caller := s.caller(w, r)
+		node := r.PathValue("name")
+		start := time.Now().UTC()
+		msg, err := s.actions.SetCordon(r.Context(), node, cordon, caller)
 		if err != nil {
 			s.actionError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, api.ActionEvent{Time: time.Now().UTC(), Status: api.EventDone, Message: msg})
+		verb := "node uncordon"
+		if cordon {
+			verb = "node cordon"
+		}
+		end := time.Now().UTC()
+		writeJSON(w, http.StatusOK, api.Operation{
+			ID: caller.RequestID, Action: verb, Target: node, Host: s.cfg.Host, Token: caller.Token,
+			State: api.OpSucceeded, Started: start, Finished: &end,
+			Events: []api.ActionEvent{{Time: end, Status: api.EventDone, Message: msg}},
+		})
 	}
+}
+
+// flag reads a boolean query parameter ("true", "1", …).
+func flag(r *http.Request, name string) bool {
+	v, _ := strconv.ParseBool(r.URL.Query().Get(name))
+	return v
+}
+
+// started answers a started action: its operation (202 Accepted), or with
+// ?wait=true its progress stream. Either way Location names the operation.
+func (s *Server) started(w http.ResponseWriter, r *http.Request, run *actions.Run, c actions.Caller) {
+	w.Header().Set("Location", "/v1/operations/"+c.RequestID)
+	if flag(r, "wait") {
+		s.stream(w, run)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, api.Operation{
+		ID: c.RequestID, Action: run.Action, Target: run.Target, Host: s.cfg.Host, Token: c.Token,
+		State: api.OpRunning, Started: run.Started,
+	})
 }
 
 func (s *Server) caller(w http.ResponseWriter, r *http.Request) actions.Caller {
@@ -229,8 +261,10 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, host string) {
 		return
 	}
 	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	for _, h := range []string{"Content-Type", "Location"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
 	}
 	w.Header().Set("X-Clusterd-Executed-By", host)
 	w.WriteHeader(resp.StatusCode)

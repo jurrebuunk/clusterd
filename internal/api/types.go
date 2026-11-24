@@ -23,7 +23,7 @@ type Whoami struct {
 	Version string `json:"version"`
 }
 
-// Node is what one clusterd instance knows about its own host (GET /v1/node).
+// Node is what one clusterd instance knows about its own host (GET /v1/internal/node).
 type Node struct {
 	Host              string        `json:"host"`
 	Version           string        `json:"version"`
@@ -64,22 +64,14 @@ type Status struct {
 	S3          S3Status     `json:"s3"`
 }
 
-// HostsStatus is GET /v1/status/hosts.
-type HostsStatus struct {
-	Hosts []HostStatus `json:"hosts"`
+// List is the body of every collection (GET /v1/hosts, /v1/vms, …). Errors
+// lists parts that couldn't be read; the items that could are still there.
+type List[T any] struct {
+	Items  []T      `json:"items"`
+	Errors []string `json:"errors,omitempty"`
 }
 
-// VMsStatus is GET /v1/status/vms.
-type VMsStatus struct {
-	VMs []VMStatus `json:"vms"`
-}
-
-// VIPsStatus is GET /v1/status/vips.
-type VIPsStatus struct {
-	VIPs []VIPStatus `json:"vips"`
-}
-
-// HostStatus is one hypervisor in /v1/status.
+// HostStatus is one hypervisor (GET /v1/hosts/{name}).
 type HostStatus struct {
 	Name           string        `json:"name"`
 	Reachable      bool          `json:"reachable"`
@@ -104,7 +96,7 @@ const (
 	VMUnknown  = "unknown"
 )
 
-// VMStatus is one VM from the inventory in /v1/status.
+// VMStatus is one VM from the inventory (GET /v1/vms/{name}).
 type VMStatus struct {
 	Name  string `json:"name"`
 	Host  string `json:"host"`
@@ -118,7 +110,7 @@ type K3sStatus struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// K3sNode is one Kubernetes node.
+// K3sNode is one Kubernetes node (GET /v1/nodes/{name}).
 type K3sNode struct {
 	Name        string   `json:"name"`
 	Ready       bool     `json:"ready"`
@@ -129,7 +121,7 @@ type K3sNode struct {
 	BootID      string   `json:"-"`
 }
 
-// CephStatus is the Ceph part of /v1/status.
+// CephStatus is Ceph's health and raw capacity (GET /v1/ceph).
 type CephStatus struct {
 	Health         string   `json:"health"`
 	Checks         []string `json:"checks"`
@@ -170,7 +162,7 @@ const (
 	EventError    = "error"
 )
 
-// RestartPlan is what a VM restart would do (POST …/restart?dry_run=1).
+// RestartPlan is what a VM restart, stop or start would do (dry_run=true).
 type RestartPlan struct {
 	VM    string   `json:"vm"`
 	Host  string   `json:"host"`
@@ -184,9 +176,10 @@ type RestartPlan struct {
 	LockHolder string `json:"lock_holder,omitempty"`
 }
 
-// DisksStatus is GET /v1/status/disks: physical disks with how full they
-// are, filesystems of hosts and VMs, and Ceph OSDs. From the monitoring
-// stores (SMART and node metrics, at most ~30 s old) and Ceph (~60 s).
+// DisksStatus is the disks part of /v1/status: physical disks with how full
+// they are, filesystems of hosts and VMs, and Ceph OSDs. From the monitoring
+// stores (SMART and node metrics, at most ~30 s old) and Ceph (~60 s). Each
+// is also its own collection: /v1/disks, /v1/filesystems, /v1/ceph/osds.
 type DisksStatus struct {
 	Disks       []Disk       `json:"disks"`
 	Filesystems []Filesystem `json:"filesystems"`
@@ -238,12 +231,13 @@ type OSD struct {
 	In          bool    `json:"in"`
 }
 
-// S3Status is GET /v1/status/s3: the object store behind the S3 endpoint.
+// S3Status is GET /v1/s3: the object store behind the S3 endpoint. The
+// buckets themselves are GET /v1/s3/buckets.
 type S3Status struct {
 	Endpoint string      `json:"endpoint"`
 	Gateways []S3Gateway `json:"gateways"`
 	Users    int         `json:"users"`
-	Buckets  []S3Bucket  `json:"buckets"`
+	Buckets  int         `json:"buckets"`
 	Objects  int64       `json:"objects"`
 	// SizeBytes is what the buckets hold (one copy).
 	SizeBytes int64  `json:"size_bytes"`
@@ -259,7 +253,7 @@ type S3Gateway struct {
 	Up   bool   `json:"up"`
 }
 
-// S3Bucket is one bucket. Quotas of 0 mean none.
+// S3Bucket is one bucket (GET /v1/s3/buckets/{name}). Quotas of 0 mean none.
 type S3Bucket struct {
 	Name         string     `json:"name"`
 	Owner        string     `json:"owner"`
@@ -306,4 +300,30 @@ const (
 	CheckOK   = "ok"
 	CheckWarn = "warn"
 	CheckFail = "fail"
+)
+
+// Operation is one action: what ran, for whom, and how it ended (GET
+// /v1/operations/{id}). Its ID is the request ID of the clusterd instance
+// that ran it. Events are only filled in for a single operation.
+type Operation struct {
+	ID       string        `json:"id"`
+	Action   string        `json:"action"` // "vm restart", "host maintenance", …
+	Target   string        `json:"target"`
+	Host     string        `json:"host"` // the hypervisor that ran it
+	Token    string        `json:"token"`
+	State    string        `json:"state"`
+	Started  time.Time     `json:"started"`
+	Finished *time.Time    `json:"finished,omitempty"`
+	Error    string        `json:"error,omitempty"`
+	Events   []ActionEvent `json:"events,omitempty"`
+}
+
+// Operation states.
+const (
+	OpRunning   = "running"
+	OpSucceeded = "succeeded"
+	OpFailed    = "failed"
+	// OpUnknown: started, but no end was recorded within the action's time
+	// limit (clusterd stopped while it ran).
+	OpUnknown = "unknown"
 )

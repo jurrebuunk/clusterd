@@ -146,24 +146,47 @@ func TestContractResponses(t *testing.T) {
 	sp := loadSpec(t)
 	h := newActionHarness(t)
 	tok := h.tokens[auth.ScopeOperator]
+	// The progress stream: every line is an ActionEvent.
+	w := do(h.handler, "POST", "/v1/vms/w1/restart?wait=true", tok)
+	for _, line := range strings.Split(strings.TrimSpace(w.Body.String()), "\n") {
+		var v any
+		if err := json.Unmarshal([]byte(line), &v); err != nil {
+			t.Fatalf("stream line %q: %v", line, err)
+		}
+		for _, e := range sp.check("event", sp.schema("ActionEvent"), v) {
+			t.Error(e)
+		}
+	}
 	for _, c := range []struct{ method, path, schema string }{
 		{"GET", "/v1/health", "Health"},
 		{"GET", "/v1/whoami", "Whoami"},
-		{"GET", "/v1/node", "Node"},
+		{"GET", "/v1/internal/node", "Node"},
 		{"GET", "/v1/status", "Status"},
-		{"GET", "/v1/status/hosts", "HostsStatus"},
-		{"GET", "/v1/status/vms", "VMsStatus"},
-		{"GET", "/v1/status/k3s", "K3sStatus"},
-		{"GET", "/v1/status/ceph", "CephStatus"},
-		{"GET", "/v1/status/vips", "VIPsStatus"},
-		{"GET", "/v1/status/disks", "DisksStatus"},
-		{"GET", "/v1/status/s3", "S3Status"},
 		{"GET", "/v1/checks", "Checks"},
-		{"POST", "/v1/actions/vms/w1/stop?dry_run=1", "RestartPlan"},
-		{"POST", "/v1/actions/nodes/w1/uncordon", "ActionEvent"},
-		{"POST", "/v1/actions/vms/w1/restart?dry_run=1", "RestartPlan"},
+		{"GET", "/v1/hosts", "HostList"},
+		{"GET", "/v1/hosts/hv1", "HostStatus"},
+		{"GET", "/v1/vms", "VMList"},
+		{"GET", "/v1/vms/w1", "VMStatus"},
+		{"GET", "/v1/nodes", "NodeList"},
+		{"GET", "/v1/nodes/w1", "K3sNode"},
+		{"GET", "/v1/ceph", "CephStatus"},
+		{"GET", "/v1/ceph/osds", "OSDList"},
+		{"GET", "/v1/disks", "DiskList"},
+		{"GET", "/v1/filesystems", "FilesystemList"},
+		{"GET", "/v1/vips", "VIPList"},
+		{"GET", "/v1/s3", "S3Status"},
+		{"GET", "/v1/s3/buckets", "BucketList"},
+		{"GET", "/v1/s3/buckets/backups", "S3Bucket"},
+		{"GET", "/v1/operations", "OperationList"},
+		{"GET", "/v1/operations/aaaaaaaaaaaaaaaa", "Operation"},
+		{"POST", "/v1/vms/w1/stop?dry_run=true", "RestartPlan"},
+		{"POST", "/v1/vms/w1/restart?dry_run=true", "RestartPlan"},
+		{"POST", "/v1/nodes/w1/uncordon", "Operation"},
 		{"GET", "/v1/nope", "Error"},
-		{"POST", "/v1/actions/vms/nope/restart", "Error"},
+		{"GET", "/v1/vms/nope", "Error"},
+		{"GET", "/v1/operations/0000000000000000", "Error"},
+		{"POST", "/v1/vms/nope/restart", "Error"},
+		{"POST", "/v1/vms/w1/restart", "Operation"}, // starts it: keep last
 	} {
 		w := do(h.handler, c.method, c.path, tok)
 		var v any
@@ -175,15 +198,5 @@ func TestContractResponses(t *testing.T) {
 			t.Error(e)
 		}
 	}
-	// The progress stream: every line is an ActionEvent.
-	w := do(h.handler, "POST", "/v1/actions/vms/w1/restart", tok)
-	for _, line := range strings.Split(strings.TrimSpace(w.Body.String()), "\n") {
-		var v any
-		if err := json.Unmarshal([]byte(line), &v); err != nil {
-			t.Fatalf("stream line %q: %v", line, err)
-		}
-		for _, e := range sp.check("event", sp.schema("ActionEvent"), v) {
-			t.Error(e)
-		}
-	}
+	waitIdle(t, h, tok)
 }

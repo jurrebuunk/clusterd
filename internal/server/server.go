@@ -99,29 +99,51 @@ func (s *Server) routes() []route {
 	return []route{
 		{"GET /v1/health", "health", auth.ScopeNone, false, s.health},
 		{"GET /v1/whoami", "whoami", auth.ScopeRead, false, s.whoami},
-		{"GET /v1/node", "node", auth.ScopeRead, false, s.node},
+		{"GET /v1/internal/node", "internal_node", auth.ScopeRead, false, s.node},
 		{"GET /v1/status", "status", auth.ScopeRead, false, s.statusAll},
-		{"GET /v1/status/hosts", "status_hosts", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.Hosts(r.Context(), callerFrom(r.Context()).raw))
+		{"GET /v1/checks", "checks", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, s.status.Checks(r.Context(), callerFrom(r.Context()).raw))
 		}},
-		{"GET /v1/status/vms", "status_vms", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.VMs(r.Context(), callerFrom(r.Context()).raw))
-		}},
-		{"GET /v1/status/k3s", "status_k3s", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.K3s(r.Context()))
-		}},
-		{"GET /v1/status/ceph", "status_ceph", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+
+		{"GET /v1/hosts", "hosts", auth.ScopeRead, false, s.hosts},
+		{"GET /v1/hosts/{name}", "host", auth.ScopeRead, false, s.hosts},
+		{"POST /v1/hosts/{name}/maintenance", "host_maintenance", auth.ScopeManage, true, s.hostAction("maintenance")},
+		{"POST /v1/hosts/{name}/resume", "host_resume", auth.ScopeManage, true, s.hostAction("resume")},
+		{"GET /v1/vms", "vms", auth.ScopeRead, false, s.vms},
+		{"GET /v1/vms/{name}", "vm", auth.ScopeRead, false, s.vms},
+		{"POST /v1/vms/{name}/restart", "vm_restart", auth.ScopeOperator, true, s.vmAction("restart")},
+		{"POST /v1/vms/{name}/stop", "vm_stop", auth.ScopeOperator, true, s.vmAction("stop")},
+		{"POST /v1/vms/{name}/start", "vm_start", auth.ScopeOperator, true, s.vmAction("start")},
+		{"GET /v1/nodes", "nodes", auth.ScopeRead, false, s.nodes},
+		{"GET /v1/nodes/{name}", "node", auth.ScopeRead, false, s.nodes},
+		{"POST /v1/nodes/{name}/cordon", "node_cordon", auth.ScopeOperator, false, s.nodeCordon(true)},
+		{"POST /v1/nodes/{name}/uncordon", "node_uncordon", auth.ScopeOperator, false, s.nodeCordon(false)},
+		{"GET /v1/ceph", "ceph", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, s.status.Ceph(r.Context()))
 		}},
-		{"GET /v1/status/vips", "status_vips", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.VIPs(r.Context(), callerFrom(r.Context()).raw))
+		{"GET /v1/ceph/osds", "ceph_osds", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			d := s.status.Disks(r.Context())
+			writeJSON(w, http.StatusOK, api.List[api.OSD]{Items: d.OSDs, Errors: d.Errors})
 		}},
-		{"GET /v1/status/disks", "status_disks", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.Disks(r.Context()))
+		{"GET /v1/disks", "disks", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			d := s.status.Disks(r.Context())
+			writeJSON(w, http.StatusOK, api.List[api.Disk]{Items: d.Disks, Errors: d.Errors})
 		}},
-		{"GET /v1/status/s3", "status_s3", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.S3(r.Context()))
+		{"GET /v1/filesystems", "filesystems", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			d := s.status.Disks(r.Context())
+			writeJSON(w, http.StatusOK, api.List[api.Filesystem]{Items: d.Filesystems, Errors: d.Errors})
 		}},
+		{"GET /v1/vips", "vips", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusOK, api.List[api.VIPStatus]{Items: s.status.VIPs(r.Context(), callerFrom(r.Context()).raw)})
+		}},
+		{"GET /v1/s3", "s3", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
+			st, _ := s.status.S3(r.Context())
+			writeJSON(w, http.StatusOK, st)
+		}},
+		{"GET /v1/s3/buckets", "s3_buckets", auth.ScopeRead, false, s.buckets},
+		{"GET /v1/s3/buckets/{name}", "s3_bucket", auth.ScopeRead, false, s.buckets},
+		{"GET /v1/operations", "operations", auth.ScopeRead, false, s.operations},
+		{"GET /v1/operations/{id}", "operation", auth.ScopeRead, false, s.operation},
 
 		{"GET /v1/metrics/query", "metrics_query", auth.ScopeRead, false, s.metricsRoute("/api/v1/query")},
 		{"GET /v1/metrics/query_range", "metrics_query_range", auth.ScopeRead, false, s.metricsRoute("/api/v1/query_range")},
@@ -133,20 +155,6 @@ func (s *Server) routes() []route {
 		{"GET /v1/logs/hits", "logs_hits", auth.ScopeRead, false, s.logsRoute("/select/logsql/hits")},
 		{"GET /v1/logs/streams", "logs_streams", auth.ScopeRead, false, s.logsRoute("/select/logsql/streams")},
 
-		{"GET /v1/checks", "checks", auth.ScopeRead, false, func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusOK, s.status.Checks(r.Context(), callerFrom(r.Context()).raw))
-		}},
-		{"POST /v1/actions/vms/{name}/restart", "vm_restart", auth.ScopeOperator, true, s.vmAction("restart")},
-		{"POST /v1/actions/vms/{name}/stop", "vm_stop", auth.ScopeOperator, true, s.vmAction("stop")},
-		{"POST /v1/actions/vms/{name}/start", "vm_start", auth.ScopeOperator, true, s.vmAction("start")},
-		{"POST /v1/actions/nodes/{name}/cordon", "node_cordon", auth.ScopeOperator, false, s.nodeCordon(true)},
-		{"POST /v1/actions/nodes/{name}/uncordon", "node_uncordon", auth.ScopeOperator, false, s.nodeCordon(false)},
-		{"POST /v1/actions/hosts/{name}/maintenance", "host_maintenance", auth.ScopeManage, true, s.hostAction("maintenance")},
-		{"POST /v1/actions/hosts/{name}/resume", "host_resume", auth.ScopeManage, true, s.hostAction("resume")},
-		// Anything else under actions still needs operator scope to learn it doesn't exist.
-		{"/v1/actions/", "actions", auth.ScopeOperator, false, func(w http.ResponseWriter, r *http.Request) {
-			writeError(w, http.StatusNotFound, "no such action")
-		}},
 		{"/", "not_found", auth.ScopeNone, false, func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not found")
 		}},

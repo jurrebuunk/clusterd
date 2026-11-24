@@ -1,10 +1,16 @@
 // Package labctl is the command-line client for the clusterd API.
+//
+// Commands are nouns with verbs (labctl vm stop, labctl s3 bucket list), as
+// in gh and docker; a few site-wide ones (status, health, logs, metrics)
+// stand on their own. Every command takes the global flags anywhere on the
+// line and answers --help.
 package labctl
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -12,9 +18,11 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-	"text/tabwriter"
+
+	"github.com/spf13/cobra"
 
 	"github.com/jurrebuunk/clusterd/internal/client"
+	"github.com/jurrebuunk/clusterd/internal/version"
 )
 
 // Exit codes, as documented in the handbook's CLI reference.
@@ -42,132 +50,186 @@ func authErr(format string, a ...any) error {
 	return &exitError{ExitAuth, fmt.Errorf(format, a...)}
 }
 
+// Output formats for -o.
+const (
+	outTable = "table"
+	outJSON  = "json"
+	outName  = "name"
+)
+
 // env is what every command gets.
 type env struct {
-	ctx    context.Context
-	cfg    *Config
-	site   string
-	json   bool
-	stdin  io.Reader
-	stdout io.Writer
-	stderr io.Writer
-	getenv func(string) string
+	ctx      context.Context
+	cfg      *Config
+	site     string
+	siteFlag string
+	output   string
+	stdin    io.Reader
+	stdout   io.Writer
+	stderr   io.Writer
+	getenv   func(string) string
 }
 
-type command struct {
-	name, args, help string
-	run              func(e *env, args []string) error
-}
-
-func commands() []command {
-	return []command{
-		{"login", "[--api URL] [--token-file F]", "Store and check a token for the site", cmdLogin},
-		{"use", "[site]", "Switch the current site, or list sites", cmdUse},
-		{"whoami", "", "Show the site, token name and scope", cmdWhoami},
-		{"status", "[host|vm|node|ceph|vip|disk|s3]", "Status of everything, or one part", cmdStatus},
-		{"metrics", "query|range <promql> [flags]", "Query metrics (PromQL / MetricsQL)", cmdMetrics},
-		{"logs", "[--host H] [--unit U] [--since D] [--limit N] [--follow] [query]", "Search or follow logs (LogsQL)", cmdLogs},
-		{"health", "", "One verdict per area; exit code 5 unless everything is ok", cmdHealth},
-		{"vm", "restart|stop|start <vm> [--yes] [--dry-run] | roll [vm...]", "Restart, stop or start VMs safely (drain first, uncordon after)", cmdVM},
-		{"node", "cordon|uncordon <node>", "Mark a node (un)schedulable", cmdNode},
-		{"host", "maintenance|resume <host> [--reboot] [--yes] [--dry-run]", "Take a host out for maintenance and bring it back", cmdHost},
-		{"token", "new --name N --scope read|operator|manage [--out F]", "Generate a token and its hash line (local)", cmdToken},
-		{"version", "", "Show labctl and server versions", cmdVersion},
-		{"completion", "bash|zsh|fish", "Print a shell completion script", cmdCompletion},
-	}
-}
-
-func usage(w io.Writer) {
-	fmt.Fprintln(w, "labctl controls the platform through the clusterd API.")
-	fmt.Fprintln(w, "\nUsage:\n  labctl [--site S] [--json] <command> [args]\n\nCommands:")
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	for _, c := range commands() {
-		fmt.Fprintf(tw, "  %s %s\t%s\n", c.name, c.args, c.help)
-	}
-	tw.Flush()
-	fmt.Fprintln(w, "\nEnvironment: LABCTL_API, LABCTL_TOKEN, LABCTL_SITE.")
-	fmt.Fprintln(w, "Exit codes: 0 ok, 1 API error, 2 usage, 3 unreachable, 4 token missing or not allowed, 5 health not ok.")
-}
+func (e *env) json() bool { return e.output == outJSON }
 
 // Main runs labctl and returns the exit code.
 func Main(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	e := &env{ctx: ctx, stdin: stdin, stdout: stdout, stderr: stderr, getenv: os.Getenv}
+	root := newRoot(e)
+	root.SetArgs(args)
+	root.SetIn(stdin)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	return exitCode(stderr, root.ExecuteContext(ctx))
+}
 
-	// Global flags may appear anywhere before "--".
-	var rest []string
-	siteFlag := ""
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--":
-			rest = append(rest, args[i:]...)
-			i = len(args)
-		case a == "--json":
-			e.json = true
-		case a == "--site":
-			if i+1 >= len(args) {
-				fmt.Fprintln(stderr, "error: --site needs a value")
-				return ExitUsage
-			}
-			siteFlag = args[i+1]
-			i++
-		case strings.HasPrefix(a, "--site="):
-			siteFlag = strings.TrimPrefix(a, "--site=")
-		default:
-			rest = append(rest, a)
-		}
-	}
-	if len(rest) == 0 || rest[0] == "help" || rest[0] == "-h" || rest[0] == "--help" {
-		usage(stdout)
-		if len(rest) == 0 {
-			return ExitUsage
-		}
-		return ExitOK
-	}
-	if rest[0] == "--version" {
-		rest[0] = "version"
-	}
+func newRoot(e *env) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "labctl",
+		Short: "labctl controls the platform through the clusterd API",
+		Long: `labctl controls the platform through the clusterd API.
 
-	if rest[0] == "completion" {
-		return exitCode(stderr, cmdCompletion(e, rest[1:]))
+Environment: LABCTL_API, LABCTL_TOKEN, LABCTL_SITE.
+Exit codes: 0 ok, 1 API error, 2 usage, 3 unreachable, 4 token missing or
+not allowed, 5 health not ok.`,
+		SilenceErrors:     true,
+		SilenceUsage:      true,
+		Version:           version.Version,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return e.load() },
+	}
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.PersistentFlags().StringVar(&e.siteFlag, "site", "", "site to talk to (default: the current one)")
+	root.PersistentFlags().StringVarP(&e.output, "output", "o", outTable, "output format: table, json or name")
+	root.RegisterFlagCompletionFunc("site", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+		if e.load() != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return e.cfg.siteNames(), cobra.ShellCompDirectiveNoFileComp
+	})
+	root.RegisterFlagCompletionFunc("output", fixed(outTable, outJSON, outName))
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return &exitError{ExitUsage, err} })
+	root.CompletionOptions.HiddenDefaultCmd = false
+
+	root.AddGroup(&cobra.Group{ID: "site", Title: "The site:"},
+		&cobra.Group{ID: "res", Title: "Resources:"},
+		&cobra.Group{ID: "cfg", Title: "Access and configuration:"})
+	for _, c := range []*cobra.Command{cmdStatus(e), cmdHealth(e), cmdLogs(e), cmdMetrics(e), cmdOperation(e)} {
+		c.GroupID = "site"
+		root.AddCommand(c)
+	}
+	for _, c := range []*cobra.Command{cmdHost(e), cmdVM(e), cmdNode(e), cmdCeph(e), cmdOSD(e), cmdDisk(e),
+		cmdFilesystem(e), cmdVIP(e), cmdS3(e)} {
+		c.GroupID = "res"
+		root.AddCommand(c)
+	}
+	for _, c := range []*cobra.Command{cmdAuth(e), cmdSite(e), cmdVersion(e)} {
+		c.GroupID = "cfg"
+		root.AddCommand(c)
+	}
+	root.SetHelpCommandGroupID("cfg")
+	root.SetCompletionCommandGroupID("cfg")
+	return root
+}
+
+// load reads the config once and settles the site.
+func (e *env) load() error {
+	if e.cfg != nil {
+		return nil
+	}
+	switch e.output {
+	case outTable, outJSON, outName:
+	default:
+		return usageErr("-o must be table, json or name, not %q", e.output)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return ExitUsage
+		return &exitError{ExitUsage, err}
 	}
 	e.cfg = cfg
 	e.site = cfg.Current
 	if s := e.getenv("LABCTL_SITE"); s != "" {
 		e.site = s
 	}
-	if siteFlag != "" {
-		e.site = siteFlag
+	if e.siteFlag != "" {
+		e.site = e.siteFlag
 	}
+	return nil
+}
 
-	if rest[0] == "__complete" {
-		cmdComplete(e, rest[1:]) // for the completion scripts; never fails loudly
-		return ExitOK
+// group is a noun with verbs: alone it prints its help; with an unknown
+// verb it is a usage error that suggests the closest one.
+func group(use, short string, aliases ...string) *cobra.Command {
+	return &cobra.Command{
+		Use: use, Short: short, Aliases: aliases,
+		Args:                       cobra.ArbitraryArgs,
+		SuggestionsMinimumDistance: 2,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			msg := fmt.Sprintf("unknown command %q for %q", args[0], cmd.CommandPath())
+			if s := cmd.SuggestionsFor(args[0]); len(s) > 0 {
+				msg += "; did you mean " + strings.Join(s, " or ") + "?"
+			}
+			return usageErr("%s", msg)
+		},
 	}
-	for _, c := range commands() {
-		if c.name == rest[0] {
-			return exitCode(stderr, c.run(e, rest[1:]))
+}
+
+// args checks the number of positional arguments as a usage error.
+func args(n int, names string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, a []string) error {
+		if len(a) != n {
+			return usageErr("usage: %s %s", cmd.CommandPath(), names)
 		}
+		return nil
 	}
-	fmt.Fprintf(stderr, "error: unknown command %q (see labctl help)\n", rest[0])
-	return ExitUsage
+}
+
+func noArgs(cmd *cobra.Command, a []string) error {
+	if len(a) > 0 {
+		return usageErr("%s takes no arguments", cmd.CommandPath())
+	}
+	return nil
+}
+
+func fixed(values ...string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+		return values, cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+// complete offers the names of a collection (e.g. /v1/vms) for one argument.
+func (e *env) complete(path string) func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(_ *cobra.Command, a []string, _ string) ([]string, cobra.ShellCompDirective) {
+		if len(a) > 0 || e.load() != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		c, err := e.client()
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		var l struct {
+			Items []struct {
+				Name string `json:"name"`
+				ID   string `json:"id"`
+			} `json:"items"`
+		}
+		if c.Get(e.ctx, path, nil, &l) != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		var out []string
+		for _, it := range l.Items {
+			out = append(out, it.Name+it.ID)
+		}
+		return out, cobra.ShellCompDirectiveNoFileComp
+	}
 }
 
 func exitCode(stderr io.Writer, err error) int {
-	if err == nil {
-		return ExitOK
-	}
-	if errors.Is(err, flag.ErrHelp) {
-		return ExitOK
-	}
-	if errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return ExitOK // Ctrl-C while following
 	}
 	fmt.Fprintln(stderr, "error:", err)
@@ -185,6 +247,8 @@ func exitCode(stderr io.Writer, err error) int {
 			return ExitAuth
 		}
 		return ExitAPI
+	case strings.HasPrefix(err.Error(), "unknown command"), strings.HasPrefix(err.Error(), "unknown flag"):
+		return ExitUsage
 	}
 	return ExitAPI
 }
@@ -196,7 +260,7 @@ func (e *env) apiURL() (string, error) {
 	}
 	s, ok := e.cfg.Sites[e.site]
 	if !ok {
-		return "", usageErr("unknown site %q (known: %s); add it with labctl login --site %s --api URL",
+		return "", usageErr("unknown site %q (known: %s); add it with labctl auth login --site %s --api URL",
 			e.site, strings.Join(e.cfg.siteNames(), ", "), e.site)
 	}
 	return s.API, nil
@@ -216,7 +280,7 @@ func (e *env) client() (*client.Client, error) {
 		}
 		token, err = readToken(path)
 		if errors.Is(err, os.ErrNotExist) || (err == nil && token == "") {
-			return nil, authErr("no token for site %s: run labctl login", e.site)
+			return nil, authErr("no token for site %s: run labctl auth login", e.site)
 		} else if err != nil {
 			return nil, err
 		}
@@ -224,29 +288,52 @@ func (e *env) client() (*client.Client, error) {
 	return client.New(api, token)
 }
 
-// parseArgs parses flags and positional arguments in any order.
-func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
-	var pos []string
-	for {
-		if err := fs.Parse(args); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return nil, err
-			}
-			return nil, &exitError{ExitUsage, err}
-		}
-		args = fs.Args()
-		if len(args) == 0 {
-			return pos, nil
-		}
-		pos = append(pos, args[0])
-		args = args[1:]
+// get fetches path into out.
+func (e *env) get(path string, out any) error {
+	c, err := e.client()
+	if err != nil {
+		return err
 	}
+	return c.Get(e.ctx, path, nil, out)
 }
 
-func newFlags(e *env, name string) *flag.FlagSet {
-	fs := flag.NewFlagSet("labctl "+name, flag.ContinueOnError)
-	fs.SetOutput(e.stderr)
-	return fs
+func (e *env) printJSON(v any) error {
+	enc := json.NewEncoder(e.stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+// render prints v as JSON, its names one per line, or the table.
+func (e *env) render(v any, names []string, table func() error) error {
+	switch e.output {
+	case outJSON:
+		return e.printJSON(v)
+	case outName:
+		if names == nil {
+			return usageErr("-o name only works for lists and single resources")
+		}
+		for _, n := range names {
+			fmt.Fprintln(e.stdout, n)
+		}
+		return nil
+	}
+	return table()
+}
+
+// confirm asks a yes/no question on a terminal; without one it needs --yes.
+func (e *env) confirm(question, what string, details []string) error {
+	if !isTerminal(e.stdin) {
+		return usageErr("not a terminal: pass --yes to %s", what)
+	}
+	for _, s := range details {
+		fmt.Fprintln(e.stderr, "  "+s)
+	}
+	fmt.Fprintf(e.stderr, "%s? [y/N] ", question)
+	answer, _ := bufio.NewReader(e.stdin).ReadString('\n')
+	if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+		return &exitError{ExitAPI, errors.New("aborted")}
+	}
+	return nil
 }
 
 func sortedKeys[V any](m map[string]V) []string {

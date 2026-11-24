@@ -68,6 +68,16 @@ func (c *Client) Do(ctx context.Context, path string, q url.Values) (io.ReadClos
 
 // Send is Do with any method.
 func (c *Client) Send(ctx context.Context, method, path string, q url.Values) (io.ReadCloser, error) {
+	resp, err := c.Request(ctx, method, path, q)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// Request sends a request and returns the response of a 2xx answer (the
+// caller closes its body); other answers become an *APIError.
+func (c *Client) Request(ctx context.Context, method, path string, q url.Values) (*http.Response, error) {
 	u := *c.base
 	u.Path = c.base.Path + path
 	u.RawQuery = q.Encode()
@@ -96,7 +106,7 @@ func (c *Client) Send(ctx context.Context, method, path string, q url.Values) (i
 		}
 		return nil, &APIError{Status: resp.StatusCode, Message: msg}
 	}
-	return resp.Body, nil
+	return resp, nil
 }
 
 // Get decodes a JSON response into out.
@@ -112,22 +122,6 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values, out any) er
 func (c *Client) Whoami(ctx context.Context) (api.Whoami, error) {
 	var w api.Whoami
 	return w, c.Get(ctx, "/v1/whoami", nil, &w)
-}
-
-// RestartPlan asks what a VM restart would do (dry run).
-func (c *Client) RestartPlan(ctx context.Context, vm string) (api.RestartPlan, error) {
-	var p api.RestartPlan
-	body, err := c.Send(ctx, http.MethodPost, "/v1/actions/vms/"+url.PathEscape(vm)+"/restart", url.Values{"dry_run": {"1"}})
-	if err != nil {
-		return p, err
-	}
-	defer body.Close()
-	return p, json.NewDecoder(body).Decode(&p)
-}
-
-// RestartVM starts the restart and returns its progress stream (JSON lines).
-func (c *Client) RestartVM(ctx context.Context, vm string) (io.ReadCloser, error) {
-	return c.Send(ctx, http.MethodPost, "/v1/actions/vms/"+url.PathEscape(vm)+"/restart", nil)
 }
 
 func (c *Client) Status(ctx context.Context) (api.Status, error) {

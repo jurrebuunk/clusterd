@@ -71,7 +71,7 @@ func newActionHarness(t *testing.T) *actionHarness {
 			return nil, nil
 		},
 	}
-	s, err := New(cfg, auth.NewStore(parsed), status.New(cfg, nil, log), eng, log)
+	s, err := New(cfg, auth.NewStore(parsed), status.NewWith(cfg, h.fake, log), eng, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,17 +83,17 @@ func TestVMRestartEndpoint(t *testing.T) {
 	h := newActionHarness(t)
 	op := h.tokens[auth.ScopeOperator]
 
-	if w := do(h.handler, "POST", "/v1/actions/vms/w1/restart", h.tokens[auth.ScopeRead]); w.Code != 403 {
+	if w := do(h.handler, "POST", "/v1/vms/w1/restart", h.tokens[auth.ScopeRead]); w.Code != 403 {
 		t.Fatalf("read token: %d", w.Code)
 	}
-	if w := do(h.handler, "GET", "/v1/actions/vms/w1/restart", op); w.Code != 404 {
+	if w := do(h.handler, "GET", "/v1/vms/w1/restart", op); w.Code != 404 {
 		t.Fatalf("GET: %d", w.Code)
 	}
-	if w := do(h.handler, "POST", "/v1/actions/vms/nope/restart", op); w.Code != 404 {
+	if w := do(h.handler, "POST", "/v1/vms/nope/restart", op); w.Code != 404 {
 		t.Fatalf("unknown VM: %d", w.Code)
 	}
 
-	w := do(h.handler, "POST", "/v1/actions/vms/w1/restart?dry_run=1", op)
+	w := do(h.handler, "POST", "/v1/vms/w1/restart?dry_run=true", op)
 	var plan api.RestartPlan
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil || len(plan.Evict) != 2 {
 		t.Fatalf("dry run: %d %s", w.Code, w.Body.String())
@@ -103,7 +103,7 @@ func TestVMRestartEndpoint(t *testing.T) {
 	}
 
 	h.fake.NodeMap["m2"].Ready = false
-	if w := do(h.handler, "POST", "/v1/actions/vms/w1/restart", op); w.Code != 412 || !strings.Contains(w.Body.String(), "m2") {
+	if w := do(h.handler, "POST", "/v1/vms/w1/restart", op); w.Code != 412 || !strings.Contains(w.Body.String(), "m2") {
 		t.Fatalf("precondition: %d %s", w.Code, w.Body.String())
 	}
 	h.fake.NodeMap["m2"].Ready = true
@@ -113,13 +113,13 @@ func TestVMRestartEndpoint(t *testing.T) {
 	l.Spec.HolderIdentity, l.Spec.LeaseDurationSeconds = "someone else", 60
 	l.Spec.RenewTime = kube.MicroTime{Time: time.Now()}
 	held, _ := h.fake.CreateLease(context.Background(), l)
-	if w := do(h.handler, "POST", "/v1/actions/vms/w1/restart", op); w.Code != 409 || !strings.Contains(w.Body.String(), "someone else") {
+	if w := do(h.handler, "POST", "/v1/vms/w1/restart", op); w.Code != 409 || !strings.Contains(w.Body.String(), "someone else") {
 		t.Fatalf("busy: %d %s", w.Code, w.Body.String())
 	}
 	h.fake.DeleteLease(context.Background(), held)
 
-	w = do(h.handler, "POST", "/v1/actions/vms/w1/restart", op)
-	if w.Code != 200 || w.Header().Get("Content-Type") != "application/x-ndjson" {
+	w = do(h.handler, "POST", "/v1/vms/w1/restart?wait=true", op)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "application/x-ndjson" || !strings.HasPrefix(w.Header().Get("Location"), "/v1/operations/") {
 		t.Fatalf("run: %d %s", w.Code, w.Header().Get("Content-Type"))
 	}
 	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
@@ -131,6 +131,29 @@ func TestVMRestartEndpoint(t *testing.T) {
 	if len(h.ran) != 1 || h.ran[0] != "--no-ask-password restart microvm@w1.service" {
 		t.Fatalf("ran %v", h.ran)
 	}
+
+	// Without wait: 202 with the running operation, named by Location.
+	w = do(h.handler, "POST", "/v1/vms/w1/restart", op)
+	var o api.Operation
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &o) != nil || o.State != api.OpRunning || o.Action != "vm restart" ||
+		w.Header().Get("Location") != "/v1/operations/"+o.ID || o.ID != w.Header().Get("X-Request-Id") {
+		t.Fatalf("202: %d %v %s", w.Code, w.Header(), w.Body.String())
+	}
+	waitIdle(t, h, op)
+}
+
+// waitIdle waits until a started action has released the lock.
+func waitIdle(t *testing.T, h *actionHarness, tok string) {
+	t.Helper()
+	for range 100 {
+		var plan api.RestartPlan
+		w := do(h.handler, "POST", "/v1/vms/m1/restart?dry_run=true", tok)
+		if json.Unmarshal(w.Body.Bytes(), &plan) == nil && plan.LockHolder == "" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the action never finished")
 }
 
 func TestVMRestartForwarding(t *testing.T) {
@@ -146,15 +169,15 @@ func TestVMRestartForwarding(t *testing.T) {
 	h.cfg.VMs[3].Host = "hv2"
 	op := h.tokens[auth.ScopeOperator]
 
-	w := do(h.handler, "POST", "/v1/actions/vms/w1/restart?dry_run=1", op)
-	if w.Code != 200 || gotAuth != "Bearer "+op || gotBy != "hv1" || gotPath != "/v1/actions/vms/w1/restart?dry_run=1" {
+	w := do(h.handler, "POST", "/v1/vms/w1/restart?dry_run=true", op)
+	if w.Code != 200 || gotAuth != "Bearer "+op || gotBy != "hv1" || gotPath != "/v1/vms/w1/restart?dry_run=true" {
 		t.Fatalf("forward: %d auth=%q by=%q path=%q", w.Code, gotAuth, gotBy, gotPath)
 	}
 	if w.Header().Get("X-Clusterd-Executed-By") != "hv2" {
 		t.Fatal("missing X-Clusterd-Executed-By")
 	}
 	// A forwarded request for a VM that isn't here is never passed on again.
-	r := httptest.NewRequest("POST", "/v1/actions/vms/w1/restart", nil)
+	r := httptest.NewRequest("POST", "/v1/vms/w1/restart", nil)
 	r.Header.Set("Authorization", "Bearer "+op)
 	r.Header.Set(forwardedHeader, "hv3")
 	rec := httptest.NewRecorder()
@@ -175,26 +198,28 @@ func TestHostAndNodeRoutes(t *testing.T) {
 	h.cfg.Hosts = append(h.cfg.Hosts, config.Host{Name: "hv2", API: peer.URL, Metrics: "http://x", Logs: "http://x"})
 	op, mg := h.tokens[auth.ScopeOperator], h.tokens[auth.ScopeManage]
 
-	if w := do(h.handler, "POST", "/v1/actions/hosts/hv2/maintenance?dry_run=1", op); w.Code != 403 {
+	if w := do(h.handler, "POST", "/v1/hosts/hv2/maintenance?dry_run=true", op); w.Code != 403 {
 		t.Fatalf("operator on host maintenance: %d", w.Code)
 	}
-	if w := do(h.handler, "POST", "/v1/actions/hosts/hv9/maintenance", mg); w.Code != 404 {
+	if w := do(h.handler, "POST", "/v1/hosts/hv9/maintenance", mg); w.Code != 404 {
 		t.Fatalf("unknown host: %d", w.Code)
 	}
-	w := do(h.handler, "POST", "/v1/actions/hosts/hv2/maintenance?dry_run=1&reboot=1", mg)
-	if w.Code != 200 || gotPath != "/v1/actions/hosts/hv2/maintenance?dry_run=1&reboot=1" || gotBy != "hv1" {
+	w := do(h.handler, "POST", "/v1/hosts/hv2/maintenance?dry_run=true&reboot=true", mg)
+	if w.Code != 200 || gotPath != "/v1/hosts/hv2/maintenance?dry_run=true&reboot=true" || gotBy != "hv1" {
 		t.Fatalf("forward: %d %q %q", w.Code, gotPath, gotBy)
 	}
 
 	h.fake.NodeMap["w1"].Schedulable = false
-	w = do(h.handler, "POST", "/v1/actions/nodes/w1/uncordon", op)
-	if w.Code != 200 || !h.fake.NodeMap["w1"].Schedulable || !strings.Contains(w.Body.String(), "node/w1 uncordoned") {
+	w = do(h.handler, "POST", "/v1/nodes/w1/uncordon", op)
+	var o api.Operation
+	if w.Code != 200 || !h.fake.NodeMap["w1"].Schedulable || json.Unmarshal(w.Body.Bytes(), &o) != nil || o.State != api.OpSucceeded ||
+		o.Action != "node uncordon" || len(o.Events) != 1 || o.Events[0].Message != "node/w1 uncordoned" {
 		t.Fatalf("uncordon: %d %s", w.Code, w.Body.String())
 	}
-	if w := do(h.handler, "POST", "/v1/actions/nodes/nope/cordon", op); w.Code != 404 {
+	if w := do(h.handler, "POST", "/v1/nodes/nope/cordon", op); w.Code != 404 {
 		t.Fatalf("unknown node: %d %s", w.Code, w.Body.String())
 	}
-	if w := do(h.handler, "POST", "/v1/actions/nodes/w1/cordon", h.tokens[auth.ScopeRead]); w.Code != 403 {
+	if w := do(h.handler, "POST", "/v1/nodes/w1/cordon", h.tokens[auth.ScopeRead]); w.Code != 403 {
 		t.Fatalf("read token cordon: %d", w.Code)
 	}
 }

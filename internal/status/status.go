@@ -25,7 +25,7 @@ type NodeLister interface {
 	Nodes(ctx context.Context) ([]api.K3sNode, error)
 }
 
-// Collector answers /v1/node and /v1/status.
+// Collector answers /v1/internal/node, /v1/status and the collections.
 type Collector struct {
 	cfg   *config.Config
 	kube  NodeLister
@@ -87,7 +87,7 @@ func NewWith(cfg *config.Config, nl NodeLister, log *slog.Logger) *Collector {
 	}
 }
 
-// nodeFacts asks every host for its /v1/node (this one locally), in parallel.
+// nodeFacts asks every host for its /v1/internal/node (this one locally), in parallel.
 // token is the caller's own bearer token: peers only answer callers they
 // would answer themselves, and no extra credential is needed between hosts.
 func (c *Collector) nodeFacts(ctx context.Context, token string) (map[string]*api.Node, map[string]error) {
@@ -139,8 +139,8 @@ func (c *Collector) hostStatuses(nodes map[string]*api.Node, errs map[string]err
 	return out
 }
 
-// Hosts is GET /v1/status/hosts.
-func (c *Collector) Hosts(ctx context.Context, token string) api.HostsStatus {
+// Hosts is GET /v1/hosts.
+func (c *Collector) Hosts(ctx context.Context, token string) []api.HostStatus {
 	var nodes map[string]*api.Node
 	var errs map[string]error
 	var maint map[string]bool
@@ -148,25 +148,25 @@ func (c *Collector) Hosts(ctx context.Context, token string) api.HostsStatus {
 	wg.Go(func() { nodes, errs = c.nodeFacts(ctx, token) })
 	wg.Go(func() { maint = c.maintenance(ctx) })
 	wg.Wait()
-	return api.HostsStatus{Hosts: c.hostStatuses(nodes, errs, maint)}
+	return c.hostStatuses(nodes, errs, maint)
 }
 
-// VMs is GET /v1/status/vms.
-func (c *Collector) VMs(ctx context.Context, token string) api.VMsStatus {
+// VMs is GET /v1/vms.
+func (c *Collector) VMs(ctx context.Context, token string) []api.VMStatus {
 	nodes, _ := c.nodeFacts(ctx, token)
-	return api.VMsStatus{VMs: vmStates(c.cfg.VMs, nodes)}
+	return vmStates(c.cfg.VMs, nodes)
 }
 
-// VIPs is GET /v1/status/vips.
-func (c *Collector) VIPs(ctx context.Context, token string) api.VIPsStatus {
+// VIPs is GET /v1/vips.
+func (c *Collector) VIPs(ctx context.Context, token string) []api.VIPStatus {
 	nodes, _ := c.nodeFacts(ctx, token)
-	return api.VIPsStatus{VIPs: vipOwners(c.cfg.VIPs, c.cfg.Hosts, nodes)}
+	return vipOwners(c.cfg.VIPs, c.cfg.Hosts, nodes)
 }
 
-// K3s is GET /v1/status/k3s.
+// K3s is GET /v1/nodes.
 func (c *Collector) K3s(ctx context.Context) api.K3sStatus { return c.k3s(ctx) }
 
-// Ceph is GET /v1/status/ceph.
+// Ceph is GET /v1/ceph.
 func (c *Collector) Ceph(ctx context.Context) api.CephStatus { return c.cephCached(ctx) }
 
 // Status gathers everything; every part runs in parallel.
@@ -179,7 +179,7 @@ func (c *Collector) Status(ctx context.Context, token string) api.Status {
 	wg.Go(func() { st.K3s = c.k3s(ctx) })
 	wg.Go(func() { st.Ceph = c.cephCached(ctx) })
 	wg.Go(func() { st.Disks = c.Disks(ctx) })
-	wg.Go(func() { st.S3 = c.S3(ctx) })
+	wg.Go(func() { st.S3, _ = c.S3(ctx) })
 	wg.Wait()
 	st.Hosts = c.hostStatuses(nodes, errs, c.maintenance(ctx))
 	st.VMs = vmStates(c.cfg.VMs, nodes)
@@ -190,7 +190,7 @@ func (c *Collector) Status(ctx context.Context, token string) api.Status {
 func round1(v float64) float64 { return float64(int64(v*10+0.5)) / 10 }
 
 func (c *Collector) peerNode(ctx context.Context, h config.Host, token string) (*api.Node, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(h.API, "/")+"/v1/node", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(h.API, "/")+"/v1/internal/node", nil)
 	if err != nil {
 		return nil, err
 	}

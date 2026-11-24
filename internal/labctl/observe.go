@@ -12,107 +12,88 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/jurrebuunk/clusterd/internal/api"
 )
 
-var statusSections = []string{"hosts", "vms", "nodes", "ceph", "vips", "disks", "s3"}
-
-// statusParts maps a section to its API endpoint.
-var statusParts = map[string]string{
-	"hosts": "/v1/status/hosts", "vms": "/v1/status/vms", "nodes": "/v1/status/k3s", "ceph": "/v1/status/ceph",
-	"vips": "/v1/status/vips", "disks": "/v1/status/disks", "s3": "/v1/status/s3",
+func cmdStatus(e *env) *cobra.Command {
+	return &cobra.Command{
+		Use: "status", Short: "The whole site at a glance (each part is also its own list)", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error {
+			c, err := e.client()
+			if err != nil {
+				return err
+			}
+			st, err := c.Status(e.ctx)
+			if err != nil {
+				return err
+			}
+			return e.render(st, nil, func() error {
+				printStatus(e.stdout, e.stderr, st, time.Now())
+				return nil
+			})
+		},
+	}
 }
 
-func cmdStatus(e *env, args []string) error {
-	if len(args) > 1 {
-		return usageErr("usage: labctl status [%s]", strings.Join(statusSections, "|"))
+// cmdHealth prints the site's checks and exits ExitUnhealthy unless all are ok.
+func cmdHealth(e *env) *cobra.Command {
+	return &cobra.Command{
+		Use: "health", Short: "One verdict per area; exit code 5 unless everything is ok", Args: noArgs,
+		RunE: func(*cobra.Command, []string) error {
+			var ch api.Checks
+			if err := e.get("/v1/checks", &ch); err != nil {
+				return err
+			}
+			err := e.render(ch, nil, func() error {
+				tw := newTable(e.stdout)
+				fmt.Fprintln(tw, "CHECK\tSTATUS\tMESSAGE")
+				for _, x := range ch.Checks {
+					fmt.Fprintf(tw, "%s\t%s\t%s\n", x.Name, x.Status, x.Message)
+				}
+				return tw.Flush()
+			})
+			if err != nil {
+				return err
+			}
+			if ch.Status != api.CheckOK {
+				return &exitError{ExitUnhealthy, fmt.Errorf("site is %s", map[string]string{api.CheckWarn: "degraded", api.CheckFail: "unhealthy"}[ch.Status])}
+			}
+			return nil
+		},
 	}
-	c, err := e.client()
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	if len(args) == 0 {
-		st, err := c.Status(e.ctx)
-		if err != nil {
-			return err
-		}
-		if e.json {
-			return e.printJSON(st)
-		}
-		printStatus(e.stdout, e.stderr, st, now)
-		return nil
-	}
-
-	aliases := map[string]string{"host": "hosts", "vm": "vms", "node": "nodes", "k3s": "nodes", "vip": "vips", "disk": "disks"}
-	section := args[0]
-	if full, ok := aliases[section]; ok {
-		section = full
-	}
-	path, ok := statusParts[section]
-	if !ok {
-		return usageErr("unknown section %q (want %s)", args[0], strings.Join(statusSections, ", "))
-	}
-	var raw json.RawMessage
-	if err := c.Get(e.ctx, path, nil, &raw); err != nil {
-		return err
-	}
-	if e.json {
-		return e.printJSON(raw)
-	}
-	tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
-	switch section {
-	case "hosts":
-		var v api.HostsStatus
-		json.Unmarshal(raw, &v)
-		printHosts(tw, e.stderr, v.Hosts)
-	case "vms":
-		var v api.VMsStatus
-		json.Unmarshal(raw, &v)
-		printVMs(tw, v.VMs)
-	case "nodes":
-		var v api.K3sStatus
-		json.Unmarshal(raw, &v)
-		printNodes(tw, e.stderr, v)
-	case "ceph":
-		var v api.CephStatus
-		json.Unmarshal(raw, &v)
-		printCeph(tw, e.stderr, v, now)
-	case "vips":
-		var v api.VIPsStatus
-		json.Unmarshal(raw, &v)
-		// Owners we can't see are reported by the hosts part; here only VIPs.
-		printVIPs(tw, e.stderr, v.VIPs, false)
-	case "disks":
-		var v api.DisksStatus
-		json.Unmarshal(raw, &v)
-		printDisks(tw, e.stdout, e.stderr, v)
-	case "s3":
-		var v api.S3Status
-		json.Unmarshal(raw, &v)
-		printS3(tw, e.stdout, e.stderr, v, now)
-	}
-	return tw.Flush()
 }
+
+func newTable(w io.Writer) *tabwriter.Writer { return tabwriter.NewWriter(w, 0, 4, 2, ' ', 0) }
 
 // printStatus prints every section as kubectl-style tables with a blank line
 // between them; problems go to warn as "warning:" lines.
 func printStatus(w, warn io.Writer, st api.Status, now time.Time) {
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	tw := newTable(w)
 	gap := func() { tw.Flush(); fmt.Fprintln(w) }
 	unreachable := printHosts(tw, warn, st.Hosts)
 	gap()
 	printVMs(tw, st.VMs)
 	gap()
-	printNodes(tw, warn, st.K3s)
+	nodes := api.List[api.K3sNode]{Items: st.K3s.Nodes}
+	if !st.K3s.Reachable {
+		nodes.Errors = []string{"k3s API unreachable: " + shortError(st.K3s.Error)}
+	}
+	printNodes(tw, warn, nodes)
 	gap()
 	printCeph(tw, warn, st.Ceph, now)
 	gap()
 	printVIPs(tw, warn, st.VIPs, unreachable > 0)
 	gap()
-	printDisks(tw, w, warn, st.Disks)
+	for _, e := range st.Disks.Errors {
+		fmt.Fprintf(warn, "warning: disks: %s\n", e)
+	}
+	printDisks(tw, warn, st.Disks.Disks)
 	gap()
-	printS3(tw, w, warn, st.S3, now)
+	printFilesystems(tw, warn, st.Disks.Filesystems)
+	gap()
+	printS3(tw, warn, st.S3, now)
 	tw.Flush()
 }
 
@@ -125,21 +106,30 @@ func printHosts(tw *tabwriter.Writer, warn io.Writer, hosts []api.HostStatus) (u
 			fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, shortError(h.Error))
 			continue
 		}
-		status := "Up"
-		if h.Maintenance {
-			status += ",Maintenance"
-		}
-		for _, s := range h.Stores {
-			if !s.OK {
-				status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
-			}
-		}
+		status := hostState(h)
 		if h.Error != "" {
 			fmt.Fprintf(warn, "warning: %s: %s\n", h.Name, h.Error)
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.0f%%\n", h.Name, status, h.Version, age(time.Duration(h.UptimeSeconds)*time.Second), h.Load1, h.MemUsedPercent)
 	}
 	return unreachable
+}
+
+// hostState is Up, Unreachable, plus Maintenance and stores that are down.
+func hostState(h api.HostStatus) string {
+	if !h.Reachable {
+		return "Unreachable"
+	}
+	status := "Up"
+	if h.Maintenance {
+		status += ",Maintenance"
+	}
+	for _, s := range h.Stores {
+		if !s.OK {
+			status += "," + map[string]string{"victoriametrics": "MetricsDown", "victorialogs": "LogsDown"}[s.Name]
+		}
+	}
+	return status
 }
 
 func printVMs(tw *tabwriter.Writer, vms []api.VMStatus) {
@@ -149,25 +139,32 @@ func printVMs(tw *tabwriter.Writer, vms []api.VMStatus) {
 	}
 }
 
-func printNodes(tw *tabwriter.Writer, warn io.Writer, k api.K3sStatus) {
-	if !k.Reachable {
-		fmt.Fprintf(warn, "warning: k3s API unreachable: %s\n", shortError(k.Error))
+func printNodes(tw *tabwriter.Writer, warn io.Writer, l api.List[api.K3sNode]) {
+	for _, e := range l.Errors {
+		fmt.Fprintf(warn, "warning: %s\n", e)
 	}
 	fmt.Fprintln(tw, "NODE\tSTATUS\tROLES\tVERSION\tZONE")
-	for _, n := range k.Nodes {
-		status := "Ready"
-		if !n.Ready {
-			status = "NotReady"
-		}
-		if !n.Schedulable {
-			status += ",SchedulingDisabled"
-		}
-		roles := strings.Join(n.Roles, ",")
-		if roles == "" {
-			roles = "<none>"
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, status, roles, n.Version, n.Zone)
+	for _, n := range l.Items {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, nodeState(n), roles(n), n.Version, n.Zone)
 	}
+}
+
+func nodeState(n api.K3sNode) string {
+	status := "Ready"
+	if !n.Ready {
+		status = "NotReady"
+	}
+	if !n.Schedulable {
+		status += ",SchedulingDisabled"
+	}
+	return status
+}
+
+func roles(n api.K3sNode) string {
+	if len(n.Roles) == 0 {
+		return "<none>"
+	}
+	return strings.Join(n.Roles, ",")
 }
 
 func printCeph(tw *tabwriter.Writer, warn io.Writer, cp api.CephStatus, now time.Time) {
@@ -202,12 +199,9 @@ func printVIPs(tw *tabwriter.Writer, warn io.Writer, vips []api.VIPStatus, someU
 	}
 }
 
-func printDisks(tw *tabwriter.Writer, w, warn io.Writer, d api.DisksStatus) {
-	for _, e := range d.Errors {
-		fmt.Fprintf(warn, "warning: disks: %s\n", e)
-	}
+func printDisks(tw *tabwriter.Writer, warn io.Writer, disks []api.Disk) {
 	fmt.Fprintln(tw, "DISK\tHOST\tROLE\tTYPE\tSIZE\tUSED\tFULL\tWEAR\tTEMP\tSMART")
-	for _, k := range d.Disks {
+	for _, k := range disks {
 		wear := "-"
 		if k.WearPercent != nil {
 			wear = pct(*k.WearPercent)
@@ -227,10 +221,11 @@ func printDisks(tw *tabwriter.Writer, w, warn io.Writer, d api.DisksStatus) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.0fC\t%s\n", k.Device, k.Host, role, k.Type,
 			bytesHuman(k.SizeBytes), bytesHuman(k.UsedBytes), pct(k.UsedPercent), wear, k.TemperatureC, smart)
 	}
-	tw.Flush()
-	fmt.Fprintln(w)
+}
+
+func printFilesystems(tw *tabwriter.Writer, warn io.Writer, fss []api.Filesystem) {
 	fmt.Fprintln(tw, "FILESYSTEM\tHOST\tDEVICE\tSIZE\tUSED\tFULL")
-	for _, f := range d.Filesystems {
+	for _, f := range fss {
 		if f.UsedPercent >= 85 {
 			fmt.Fprintf(warn, "warning: %s %s is %s full\n", f.Host, f.Mountpoint, pct(f.UsedPercent))
 		}
@@ -238,7 +233,7 @@ func printDisks(tw *tabwriter.Writer, w, warn io.Writer, d api.DisksStatus) {
 	}
 }
 
-func printS3(tw *tabwriter.Writer, w, warn io.Writer, s api.S3Status, now time.Time) {
+func printS3(tw *tabwriter.Writer, warn io.Writer, s api.S3Status, now time.Time) {
 	for _, e := range s.Errors {
 		fmt.Fprintf(warn, "warning: s3: %s\n", e)
 	}
@@ -259,15 +254,13 @@ func printS3(tw *tabwriter.Writer, w, warn io.Writer, s api.S3Status, now time.T
 	}
 	endpoint := strings.TrimPrefix(s.Endpoint, "https://")
 	fmt.Fprintln(tw, "S3\tGATEWAYS\tUSERS\tBUCKETS\tOBJECTS\tSTORED\tROOM\tFULL\tCERT")
-	fmt.Fprintf(tw, "%s\t%d/%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n", endpoint, up, len(s.Gateways), s.Users, len(s.Buckets), s.Objects,
+	fmt.Fprintf(tw, "%s\t%d/%d\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n", endpoint, up, len(s.Gateways), s.Users, s.Buckets, s.Objects,
 		bytesHuman(s.SizeBytes), bytesHuman(s.Pool.MaxAvailBytes), pct(s.Pool.UsedPercent), cert)
-	if len(s.Buckets) == 0 {
-		return
-	}
-	tw.Flush()
-	fmt.Fprintln(w)
+}
+
+func printBuckets(tw *tabwriter.Writer, warn io.Writer, buckets []api.S3Bucket) {
 	fmt.Fprintln(tw, "BUCKET\tOWNER\tOBJECTS\tSIZE\tQUOTA\tFULL")
-	for _, b := range s.Buckets {
+	for _, b := range buckets {
 		quota, full := "-", "-"
 		if b.QuotaBytes > 0 {
 			quota = bytesHuman(b.QuotaBytes)
@@ -394,44 +387,45 @@ type promSample struct {
 	Values [][2]any          `json:"values"`
 }
 
-func cmdMetrics(e *env, args []string) error {
-	if len(args) == 0 || (args[0] != "query" && args[0] != "range") {
-		return usageErr("usage: labctl metrics query <promql> [--time T] | metrics range <promql> [--since 1h] [--step 1m]")
+func cmdMetrics(e *env) *cobra.Command {
+	c := group("metrics", "Query metrics (PromQL / MetricsQL)")
+	var at string
+	query := &cobra.Command{
+		Use: "query PROMQL", Short: "Instant query", Args: args(1, "PROMQL (quote it)"),
+		RunE: func(_ *cobra.Command, a []string) error {
+			q := url.Values{"query": {a[0]}}
+			if at != "" {
+				q.Set("time", at)
+			}
+			return e.metrics("/v1/metrics/query", q)
+		},
 	}
-	mode := args[0]
-	fs := newFlags(e, "metrics "+mode)
-	at := fs.String("time", "", "evaluation time (RFC 3339 or Unix seconds; default now)")
-	since := fs.String("since", "1h", "range: how far back")
-	step := fs.String("step", "", "range: resolution (default: since/60, at least 15s)")
-	pos, err := parseArgs(fs, args[1:])
-	if err != nil {
-		return err
+	query.Flags().StringVar(&at, "time", "", "evaluation time (RFC 3339 or Unix seconds; default now)")
+	var since, step string
+	rng := &cobra.Command{
+		Use: "range PROMQL", Short: "Range query over the last --since", Args: args(1, "PROMQL (quote it)"),
+		RunE: func(_ *cobra.Command, a []string) error {
+			d, err := parseSince(since)
+			if err != nil {
+				return usageErr("--since: %v", err)
+			}
+			st := step
+			if st == "" {
+				st = (max(d/60, 15*time.Second)).Round(time.Second).String()
+			}
+			end := time.Now()
+			q := url.Values{"query": {a[0]}, "start": {strconv.FormatInt(end.Add(-d).Unix(), 10)},
+				"end": {strconv.FormatInt(end.Unix(), 10)}, "step": {st}}
+			return e.metrics("/v1/metrics/query_range", q)
+		},
 	}
-	if len(pos) != 1 {
-		return usageErr("give exactly one query (quote it)")
-	}
-	q := url.Values{"query": {pos[0]}}
-	path := "/v1/metrics/query"
-	if mode == "query" {
-		if *at != "" {
-			q.Set("time", *at)
-		}
-	} else {
-		path = "/v1/metrics/query_range"
-		d, err := parseSince(*since)
-		if err != nil {
-			return usageErr("--since: %v", err)
-		}
-		st := *step
-		if st == "" {
-			st = (max(d/60, 15*time.Second)).Round(time.Second).String()
-		}
-		end := time.Now()
-		q.Set("start", strconv.FormatInt(end.Add(-d).Unix(), 10))
-		q.Set("end", strconv.FormatInt(end.Unix(), 10))
-		q.Set("step", st)
-	}
+	rng.Flags().StringVar(&since, "since", "1h", "how far back")
+	rng.Flags().StringVar(&step, "step", "", "resolution (default: since/60, at least 15s)")
+	c.AddCommand(query, rng)
+	return c
+}
 
+func (e *env) metrics(path string, q url.Values) error {
 	c, err := e.client()
 	if err != nil {
 		return err
@@ -441,7 +435,7 @@ func cmdMetrics(e *env, args []string) error {
 		return err
 	}
 	defer body.Close()
-	if e.json {
+	if e.json() {
 		_, err := io.Copy(e.stdout, body)
 		return err
 	}
@@ -574,33 +568,40 @@ func fmtLogsDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", int64(d.Seconds()))
 }
 
-func cmdLogs(e *env, args []string) error {
-	fs := newFlags(e, "logs")
-	host := fs.String("host", "", "only this host (e.g. hgd1-hv01, hgd1-fw01)")
-	unit := fs.String("unit", "", "only this systemd unit or syslog app; \"ceph-osd*\" for a prefix")
-	since := fs.String("since", "1h", "how far back")
-	limit := fs.Int("limit", 100, "at most this many lines")
-	follow := fs.Bool("follow", false, "keep printing new lines (Ctrl-C stops)")
-	fs.BoolVar(follow, "f", false, "short for --follow")
-	pos, err := parseArgs(fs, args)
-	if err != nil {
-		return err
+func cmdLogs(e *env) *cobra.Command {
+	var host, unit, since string
+	var limit int
+	var follow bool
+	c := &cobra.Command{
+		Use: "logs [LOGSQL]", Short: "Search or follow logs of hosts, VMs, the router and the switch (LogsQL)",
+		RunE: func(_ *cobra.Command, pos []string) error {
+			d, err := parseSince(since)
+			if err != nil {
+				return usageErr("--since: %v", err)
+			}
+			if limit < 1 {
+				return usageErr("--limit must be at least 1")
+			}
+			user := strings.Join(pos, " ")
+			q := url.Values{"query": {buildLogsQuery(host, unit, d, limit, follow, user)}}
+			if follow {
+				q.Set("follow", "1")
+			} else {
+				q.Set("limit", strconv.Itoa(limit))
+			}
+			return e.logs(q, follow, strings.Contains(user, "|"))
+		},
 	}
-	d, err := parseSince(*since)
-	if err != nil {
-		return usageErr("--since: %v", err)
-	}
-	if *limit < 1 {
-		return usageErr("--limit must be at least 1")
-	}
-	query := buildLogsQuery(*host, *unit, d, *limit, *follow, strings.Join(pos, " "))
+	c.Flags().StringVar(&host, "host", "", "only this host (e.g. hgd1-hv01, hgd1-fw01)")
+	c.Flags().StringVar(&unit, "unit", "", "only this systemd unit or syslog app; \"ceph-osd*\" for a prefix")
+	c.Flags().StringVar(&since, "since", "1h", "how far back")
+	c.Flags().IntVar(&limit, "limit", 100, "at most this many lines")
+	c.Flags().BoolVarP(&follow, "follow", "f", false, "keep printing new lines (Ctrl-C stops)")
+	c.RegisterFlagCompletionFunc("host", e.complete("/v1/hosts"))
+	return c
+}
 
-	q := url.Values{"query": {query}}
-	if *follow {
-		q.Set("follow", "1")
-	} else {
-		q.Set("limit", strconv.Itoa(*limit))
-	}
+func (e *env) logs(q url.Values, follow, piped bool) error {
 	c, err := e.client()
 	if err != nil {
 		return err
@@ -613,7 +614,7 @@ func cmdLogs(e *env, args []string) error {
 
 	sc := bufio.NewScanner(body)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
-	if *follow {
+	if follow {
 		for sc.Scan() {
 			e.printLogLine(sc.Bytes())
 		}
@@ -629,7 +630,7 @@ func cmdLogs(e *env, args []string) error {
 	if err := sc.Err(); err != nil {
 		return err
 	}
-	if !strings.Contains(strings.Join(pos, " "), "|") {
+	if !piped {
 		// The query sorted newest first; print in reading order.
 		for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
 			lines[i], lines[j] = lines[j], lines[i]
@@ -642,7 +643,7 @@ func cmdLogs(e *env, args []string) error {
 }
 
 func (e *env) printLogLine(line []byte) {
-	if e.json {
+	if e.json() {
 		fmt.Fprintf(e.stdout, "%s\n", line)
 		return
 	}

@@ -10,10 +10,11 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/s3admin"
 )
 
-// S3 reports the object store: gateways, users, buckets with their usage and
-// quotas, the data pool's room, and the endpoint's certificate.
-func (c *Collector) S3(ctx context.Context) api.S3Status {
-	st := api.S3Status{Endpoint: c.cfg.S3.Endpoint, Gateways: []api.S3Gateway{}, Buckets: []api.S3Bucket{}, Pool: api.S3Pool{Name: c.cfg.S3.DataPool}}
+// S3 reports the object store (gateways, users, totals, the data pool's room
+// and the endpoint's certificate) and its buckets with usage and quotas.
+func (c *Collector) S3(ctx context.Context) (api.S3Status, []api.S3Bucket) {
+	st := api.S3Status{Endpoint: c.cfg.S3.Endpoint, Gateways: []api.S3Gateway{}, Pool: api.S3Pool{Name: c.cfg.S3.DataPool}}
+	buckets := []api.S3Bucket{}
 	var mu sync.Mutex
 	fail := func(what string, err error) {
 		mu.Lock()
@@ -58,7 +59,7 @@ func (c *Collector) S3(ctx context.Context) api.S3Status {
 					if t, err := time.Parse(time.RFC3339Nano, b.CreationTime); err == nil {
 						bk.Created = &t
 					}
-					st.Buckets = append(st.Buckets, bk)
+					buckets = append(buckets, bk)
 					st.Objects += bk.Objects
 					st.SizeBytes += bk.SizeBytes
 				}
@@ -119,8 +120,9 @@ func (c *Collector) S3(ctx context.Context) api.S3Status {
 	wg.Wait()
 
 	st.Pool.UsedPercent = percent(st.Pool.StoredBytes, st.Pool.StoredBytes+st.Pool.MaxAvailBytes)
-	sort.Slice(st.Buckets, func(i, j int) bool { return st.Buckets[i].Name < st.Buckets[j].Name })
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Name < buckets[j].Name })
+	st.Buckets = len(buckets)
 	sort.Slice(st.Gateways, func(i, j int) bool { return st.Gateways[i].Host < st.Gateways[j].Host })
 	sort.Strings(st.Errors)
-	return st
+	return st, buckets
 }

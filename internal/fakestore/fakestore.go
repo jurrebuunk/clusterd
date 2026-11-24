@@ -67,9 +67,36 @@ var answers = []struct {
 	{"node_systemd_unit_state", []series{s("1", "instance", "hv01", "name", "broken.service")}},
 }
 
-// Store is a fake VictoriaMetrics: /health and /api/v1/query.
+// OpLogs are the audit and progress records the fake log store returns, as
+// VictoriaLogs answers after unpack_logfmt: one finished restart, one failed
+// stop, and a start that is still running (Time relative to OpNow).
+var OpLogs = []map[string]string{
+	{"_time": "2026-11-20T10:00:00Z", "host": "hv01", "msg": "audit", "action": "vm restart", "target": "w1", "token": "laptop", "request_id": "aaaaaaaaaaaaaaaa", "event": "start"},
+	{"_time": "2026-11-20T10:00:05Z", "host": "hv01", "msg": "action progress", "action": "vm restart", "target": "w1", "token": "laptop", "request_id": "aaaaaaaaaaaaaaaa", "message": "node/w1 cordoned"},
+	{"_time": "2026-11-20T10:00:40Z", "host": "hv01", "msg": "audit", "action": "vm restart", "target": "w1", "token": "laptop", "request_id": "aaaaaaaaaaaaaaaa", "event": "end", "result": "ok"},
+	{"_time": "2026-11-20T11:00:00Z", "host": "hv02", "msg": "audit", "action": "vm stop", "target": "m1", "token": "laptop", "request_id": "bbbbbbbbbbbbbbbb", "event": "start"},
+	{"_time": "2026-11-20T11:00:09Z", "host": "hv02", "msg": "audit", "action": "vm stop", "target": "m1", "token": "laptop", "request_id": "bbbbbbbbbbbbbbbb", "event": "end", "result": "error", "error": "drain timed out"},
+	{"_time": "2026-11-20T11:59:00Z", "host": "hv01", "msg": "audit", "action": "host resume", "target": "hv01", "token": "ci", "request_id": "cccccccccccccccc", "event": "start"},
+}
+
+// Store is a fake VictoriaMetrics (/api/v1/query) and VictoriaLogs
+// (/select/logsql/query, answering OpLogs).
 func Store() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/select/logsql/query" {
+			q := r.URL.Query().Get("query")
+			enc := json.NewEncoder(w)
+			for _, rec := range OpLogs {
+				if strings.Contains(q, `"request_id=`) && !strings.Contains(q, `"request_id=`+rec["request_id"]+`"`) {
+					continue
+				}
+				if strings.Contains(q, "target:=") && !strings.Contains(q, `target:="`+rec["target"]+`"`) {
+					continue
+				}
+				enc.Encode(rec)
+			}
+			return
+		}
 		if r.URL.Path != "/api/v1/query" {
 			return // /health and anything else: 200, empty
 		}

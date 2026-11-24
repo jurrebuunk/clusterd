@@ -1,13 +1,21 @@
 openapi: 3.1.0
 info:
   title: clusterd
-  version: 1.2.0
+  version: 2.0.0
   summary: Platform API of the homelab
   description: |
     One stateless instance per hypervisor behind a highly available address.
     Every endpoint except /v1/health needs `Authorization: Bearer <token>`.
     Scopes nest: manage ⊃ operator ⊃ read. Errors are `{"error": "..."}`.
-    Stable from 1.0.0: /v1 only changes in backward-compatible ways (new
+
+    Resources: every collection answers `{"items": [...], "errors": [...]}`
+    (errors lists parts that couldn't be read) and `/{name}` answers one
+    item. Actions are `POST /v1/<resource>/{name}/<action>`: with
+    `dry_run=true` the plan comes back (200) and nothing changes; otherwise
+    the action starts and the answer is its operation (202, `Location:
+    /v1/operations/{id}`), or with `wait=true` its progress as JSON lines.
+
+    Stable from 2.0.0: /v1 only changes in backward-compatible ways (new
     endpoints, new optional fields); anything breaking goes to /v2.
     Handbook: https://jurrebuunk.github.io/nix-hgd1-cluster/reference/api/
 servers:
@@ -39,9 +47,9 @@ paths:
               schema: { $ref: "#/components/schemas/Whoami" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
-  /v1/node:
+  /v1/internal/node:
     get:
-      summary: Facts about the answering host only (used by /v1/status on peers)
+      summary: Facts about the answering host only (peers ask it for /v1/status)
       x-scope: read
       responses:
         "200":
@@ -53,106 +61,18 @@ paths:
 
   /v1/status:
     get:
-      summary: Everything at once; each part is also its own /v1/status/<part>
-      description: |
-        Asks every peer's /v1/node with the caller's own token. Parts that fail
-        are reported in place (unreachable host, k3s error, ceph error); the
-        call itself still succeeds.
+      summary: "Everything at once: hosts, VMs, nodes, Ceph, VIPs, disks, S3"
       x-scope: read
+      description: |
+        Asks every peer with the caller's own token. Parts that fail are
+        reported in place (unreachable host, k3s error, ceph error); the call
+        itself still succeeds.
       responses:
         "200":
           description: OK
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Status" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/hosts:
-    get:
-      summary: "Hypervisors: reachability, version, uptime, load, memory, stores"
-      x-scope: read
-      description: Asks every host (/v1/node) with the caller's token.
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HostsStatus" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/vms:
-    get:
-      summary: VMs from the inventory and their state
-      x-scope: read
-      description: Asks every host (/v1/node) with the caller's token.
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/VMsStatus" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/k3s:
-    get:
-      summary: Kubernetes nodes
-      x-scope: read
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/K3sStatus" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/ceph:
-    get:
-      summary: Ceph health and raw capacity (refreshed every 10 s)
-      x-scope: read
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/CephStatus" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/vips:
-    get:
-      summary: Which host holds each floating address
-      x-scope: read
-      description: Asks every host (/v1/node) with the caller's token.
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/VIPsStatus" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/disks:
-    get:
-      summary: Physical disks (size, how full, wear, SMART), filesystems and OSDs
-      x-scope: read
-      description: From the SMART and node metrics (about 30 s old) and Ceph (about 60 s).
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/DisksStatus" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/status/s3:
-    get:
-      summary: "Object store: gateways, users, buckets with usage and quotas, pool room, certificate"
-      x-scope: read
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/S3Status" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/checks:
@@ -166,6 +86,422 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Checks" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/hosts:
+    get:
+      summary: "Hypervisors: reachability, version, uptime, load, memory, maintenance"
+      x-scope: read
+      description: |
+        Asks every host with the caller's token; an unreachable one is listed with its error.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/hosts/{name}:
+    get:
+      summary: "One hypervisor"
+      x-scope: read
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/hosts/{name}/maintenance:
+    post:
+      summary: "Take a host out: drain and stop its VMs, set noout for its OSDs"
+      description: |
+        Runs on the host itself (others forward). Refuses (412) when another host
+        is in maintenance, a node elsewhere isn't Ready, etcd would lose quorum or
+        `ceph osd ok-to-stop` says no. The host stays in maintenance (Ceph's
+        per-host noout flag) until resume. With reboot=true the host reboots right
+        after the action ends.
+      x-scope: manage
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/DryRun" }
+        - { $ref: "#/components/parameters/Wait" }
+        - { name: reboot, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: The plan (dry_run) or the progress stream (wait)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostPlan" }
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ActionEvent" }
+        "202": { $ref: "#/components/responses/Started" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Busy" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/hosts/{name}/resume:
+    post:
+      summary: "Bring a host back: start its VMs, wait Ready, uncordon, unset noout, wait for clean PGs"
+      description: |
+        Runs on the host itself, so the host must be up.
+      x-scope: manage
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/DryRun" }
+        - { $ref: "#/components/parameters/Wait" }
+      responses:
+        "200":
+          description: The plan (dry_run) or the progress stream (wait)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HostPlan" }
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ActionEvent" }
+        "202": { $ref: "#/components/responses/Started" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Busy" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/vms:
+    get:
+      summary: "VMs from the inventory and their state"
+      x-scope: read
+      description: |
+        Asks every host with the caller's token.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/vms/{name}:
+    get:
+      summary: "One VM"
+      x-scope: read
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VMStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/vms/{name}/restart:
+    post:
+      summary: "Restart a VM safely: cordon, drain, restart, wait Ready, uncordon"
+      description: |
+        Runs on the VM's own host; another instance forwards the request there
+        with the caller's token. One disruptive action runs at a time across the
+        cluster (a Kubernetes Lease). The action finishes even if the client
+        disconnects.
+        Preconditions: the VM is enabled in the inventory, every other node is
+        Ready, etcd keeps quorum, and no pod without a controller would be lost.
+      x-scope: operator
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/DryRun" }
+        - { $ref: "#/components/parameters/Wait" }
+      responses:
+        "200":
+          description: The plan (dry_run) or the progress stream (wait)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RestartPlan" }
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ActionEvent" }
+        "202": { $ref: "#/components/responses/Started" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Busy" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/vms/{name}/stop:
+    post:
+      summary: "Stop a VM safely: cordon, drain, stop; the node stays cordoned"
+      description: |
+        Runs on the VM's own host; another instance forwards the request there
+        with the caller's token. One disruptive action runs at a time across the
+        cluster (a Kubernetes Lease). The action finishes even if the client
+        disconnects.
+        A stopped VM starts again when its host boots; to keep it off, disable it
+        in the inventory.
+      x-scope: operator
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/DryRun" }
+        - { $ref: "#/components/parameters/Wait" }
+      responses:
+        "200":
+          description: The plan (dry_run) or the progress stream (wait)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RestartPlan" }
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ActionEvent" }
+        "202": { $ref: "#/components/responses/Started" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Busy" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/vms/{name}/start:
+    post:
+      summary: "Start a stopped VM, wait until its node is Ready, uncordon"
+      description: |
+        Runs on the VM's own host; another instance forwards the request there
+        with the caller's token. One disruptive action runs at a time across the
+        cluster (a Kubernetes Lease). The action finishes even if the client
+        disconnects.
+        412 when the VM runs already.
+      x-scope: operator
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/DryRun" }
+        - { $ref: "#/components/parameters/Wait" }
+      responses:
+        "200":
+          description: The plan (dry_run) or the progress stream (wait)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RestartPlan" }
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/ActionEvent" }
+        "202": { $ref: "#/components/responses/Started" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Busy" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/nodes:
+    get:
+      summary: "Kubernetes nodes"
+      x-scope: read
+      description: |
+        When the k3s API is unreachable the list is empty and errors says why.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/nodes/{name}:
+    get:
+      summary: "One Kubernetes node"
+      x-scope: read
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/K3sNode" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/nodes/{name}/cordon:
+    post:
+      summary: "Mark a node unschedulable"
+      description: |
+        Done when it answers: the operation comes back finished.
+      x-scope: operator
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The finished operation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/nodes/{name}/uncordon:
+    post:
+      summary: "Mark a node schedulable again"
+      description: |
+        Done when it answers: the operation comes back finished.
+      x-scope: operator
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The finished operation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/NoKubernetes" }
+
+  /v1/ceph:
+    get:
+      summary: "Ceph health and raw capacity (refreshed every 10 s)"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CephStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/ceph/osds:
+    get:
+      summary: "Ceph OSDs: size, usage, up and in (refreshed every 60 s)"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OSDList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/disks:
+    get:
+      summary: "Physical disks: size, usage, wear, temperature, SMART"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiskList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/filesystems:
+    get:
+      summary: "Filesystems of hosts and VMs"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FilesystemList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/vips:
+    get:
+      summary: "Floating addresses and which host holds each"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VIPList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/s3:
+    get:
+      summary: "The object store: gateways, totals, room left, certificate"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Status" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/s3/buckets:
+    get:
+      summary: "Buckets with usage and quotas"
+      x-scope: read
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BucketList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/s3/buckets/{name}:
+    get:
+      summary: "One bucket"
+      x-scope: read
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Bucket" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/operations:
+    get:
+      summary: "Actions of the last day (or since), newest first"
+      x-scope: read
+      description: |
+        Read from the audit records every action writes to the journal, as
+        VictoriaLogs has them (a few seconds behind). Without events.
+      parameters:
+        - { name: since, in: query, schema: { type: string, default: 24h }, description: "Go duration, up to 744h" }
+        - { name: target, in: query, schema: { type: string }, description: "Only actions on this VM, node or host" }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /v1/operations/{id}:
+    get:
+      summary: "One action with its progress lines"
+      x-scope: read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, pattern: "^[0-9a-f]{16}$" } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Operation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /v1/metrics/query:
     get:
@@ -237,178 +573,6 @@ paths:
       x-scope: read
       responses: *proxied
 
-  /v1/actions/vms/{name}/restart:
-    post:
-      summary: Restart a VM safely (cordon, drain, restart, wait Ready, uncordon)
-      description: |
-        Runs on the VM's own host; another instance forwards the request there
-        with the caller's token. Preconditions: the VM is enabled in the
-        inventory, every other node is Ready, etcd keeps quorum, and no pod
-        without a controller would be lost. One disruptive action runs at a
-        time across the cluster (a Kubernetes Lease). Progress streams as JSON
-        lines; the action finishes even if the client disconnects. With
-        dry_run=1 nothing changes and the plan comes back.
-      x-scope: operator
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-        - { name: dry_run, in: query, schema: { type: boolean } }
-      responses:
-        "200":
-          description: The plan (dry run) or the progress stream
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RestartPlan" }
-            application/x-ndjson:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Busy" }
-        "412": { $ref: "#/components/responses/Unsafe" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
-  /v1/actions/vms/{name}/stop:
-    post:
-      summary: "Stop a VM safely (cordon, drain, stop); the node stays cordoned"
-      description: |
-        The restart's checks and lock, then cordon, drain and stop
-        microvm@{name} on its host. A stopped VM starts again when its host boots;
-        to keep it off, disable it in the inventory.
-      x-scope: operator
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-        - { name: dry_run, in: query, schema: { type: boolean } }
-      responses:
-        "200":
-          description: The plan (dry run) or the progress stream
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RestartPlan" }
-            application/x-ndjson:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Busy" }
-        "412": { $ref: "#/components/responses/Unsafe" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
-  /v1/actions/vms/{name}/start:
-    post:
-      summary: "Start a stopped VM, wait until its node is Ready, uncordon"
-      description: |
-        412 when the VM runs already.
-      x-scope: operator
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-        - { name: dry_run, in: query, schema: { type: boolean } }
-      responses:
-        "200":
-          description: The plan (dry run) or the progress stream
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RestartPlan" }
-            application/x-ndjson:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Busy" }
-        "412": { $ref: "#/components/responses/Unsafe" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
-  /v1/actions/nodes/{name}/cordon:
-    post:
-      summary: "Mark a node unschedulable"
-      x-scope: operator
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-      responses:
-        "200":
-          description: Done
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
-  /v1/actions/nodes/{name}/uncordon:
-    post:
-      summary: "Mark a node schedulable again (e.g. after a restart that left it cordoned)"
-      x-scope: operator
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-      responses:
-        "200":
-          description: Done
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
-  /v1/actions/hosts/{name}/maintenance:
-    post:
-      summary: "Take a host out: drain and stop its VMs, set noout for its OSDs"
-      description: |
-        Runs on the host itself (others forward). Refuses (412) when another host
-        is in maintenance, a node elsewhere isn't Ready, etcd would lose quorum or
-        `ceph osd ok-to-stop` says no. The host stays in maintenance (Ceph's
-        per-host noout flag) until resume. With reboot=1 the host reboots right
-        after the last progress line.
-      x-scope: manage
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-        - { name: dry_run, in: query, schema: { type: boolean } }
-        - { name: reboot, in: query, schema: { type: boolean } }
-      responses:
-        "200":
-          description: The plan (dry run) or the progress stream
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HostPlan" }
-            application/x-ndjson:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Busy" }
-        "412": { $ref: "#/components/responses/Unsafe" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
-  /v1/actions/hosts/{name}/resume:
-    post:
-      summary: "Bring a host back: start its VMs, wait Ready, uncordon, unset noout, wait for clean PGs"
-      description: |
-        Runs on the host itself, so the host must be up.
-      x-scope: manage
-      parameters:
-        - { name: name, in: path, required: true, schema: { type: string } }
-        - { name: dry_run, in: query, schema: { type: boolean } }
-      responses:
-        "200":
-          description: The plan (dry run) or the progress stream
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/HostPlan" }
-            application/x-ndjson:
-              schema: { $ref: "#/components/schemas/ActionEvent" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
-        "409": { $ref: "#/components/responses/Busy" }
-        "412": { $ref: "#/components/responses/Unsafe" }
-        "502": { $ref: "#/components/responses/BadGateway" }
-        "503": { $ref: "#/components/responses/NoKubernetes" }
-
 components:
   securitySchemes:
     bearer:
@@ -417,6 +581,16 @@ components:
       description: A token from `labctl token new`, format lab_<43 base64url chars>.
 
   parameters:
+    DryRun:
+      name: dry_run
+      in: query
+      description: Only return the plan; nothing changes
+      schema: { type: boolean }
+    Wait:
+      name: wait
+      in: query
+      description: Stream progress as JSON lines until the action ends, instead of 202
+      schema: { type: boolean }
     PromQuery:
       name: query
       in: query
@@ -435,7 +609,7 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
     NotFound:
-      description: No such endpoint or action
+      description: No such endpoint or resource
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -454,8 +628,20 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Started:
+      description: The action started; Location is its operation
+      headers:
+        Location: { schema: { type: string }, description: "/v1/operations/{id}" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Operation" }
+    BadRequest:
+      description: An invalid parameter
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadGateway:
-      description: No monitoring store, or the VM's host, answered
+      description: No monitoring or log store, or the VM's host, answered
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -516,18 +702,60 @@ components:
         vips: { type: array, items: { $ref: "#/components/schemas/VIPStatus" } }
         disks: { $ref: "#/components/schemas/DisksStatus" }
         s3: { $ref: "#/components/schemas/S3Status" }
-    HostsStatus:
+    HostList:
       type: object
+      required: [items]
       properties:
-        hosts: { type: array, items: { $ref: "#/components/schemas/HostStatus" } }
-    VMsStatus:
+        items: { type: array, items: { $ref: "#/components/schemas/HostStatus" } }
+        errors: { type: array, items: { type: string } }
+    VMList:
       type: object
+      required: [items]
       properties:
-        vms: { type: array, items: { $ref: "#/components/schemas/VMStatus" } }
-    VIPsStatus:
+        items: { type: array, items: { $ref: "#/components/schemas/VMStatus" } }
+        errors: { type: array, items: { type: string } }
+    NodeList:
       type: object
+      required: [items]
       properties:
-        vips: { type: array, items: { $ref: "#/components/schemas/VIPStatus" } }
+        items: { type: array, items: { $ref: "#/components/schemas/K3sNode" } }
+        errors: { type: array, items: { type: string } }
+    VIPList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/VIPStatus" } }
+        errors: { type: array, items: { type: string } }
+    DiskList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Disk" } }
+        errors: { type: array, items: { type: string } }
+    FilesystemList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Filesystem" } }
+        errors: { type: array, items: { type: string } }
+    OSDList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/OSD" } }
+        errors: { type: array, items: { type: string } }
+    BucketList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/S3Bucket" } }
+        errors: { type: array, items: { type: string } }
+    OperationList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Operation" } }
+        errors: { type: array, items: { type: string } }
     HostStatus:
       type: object
       properties:
@@ -551,17 +779,16 @@ components:
       properties:
         reachable: { type: boolean }
         error: { type: string }
-        nodes:
-          type: array
-          items:
-            type: object
-            properties:
-              name: { type: string }
-              ready: { type: boolean }
-              schedulable: { type: boolean }
-              roles: { type: array, items: { type: string } }
-              version: { type: string }
-              zone: { type: string }
+        nodes: { type: array, items: { $ref: "#/components/schemas/K3sNode" } }
+    K3sNode:
+      type: object
+      properties:
+        name: { type: string }
+        ready: { type: boolean }
+        schedulable: { type: boolean }
+        roles: { type: array, items: { type: string } }
+        version: { type: string }
+        zone: { type: string }
     CephStatus:
       type: object
       properties:
@@ -586,51 +813,9 @@ components:
     DisksStatus:
       type: object
       properties:
-        disks:
-          type: array
-          items:
-            type: object
-            properties:
-              host: { type: string }
-              device: { type: string, description: "nvme0, sda" }
-              type: { type: string, enum: [nvme, ssd, hdd] }
-              model: { type: string }
-              serial: { type: string }
-              role: { type: string, description: '"system", "data", "osd.N" or empty when unknown' }
-              size_bytes: { type: integer }
-              used_bytes: { type: integer, description: "The OSD's usage, or the filesystems on the disk's partitions" }
-              used_percent: { type: number }
-              wear_percent: { type: number, description: NVMe endurance used; absent for HDDs }
-              temperature_c: { type: number }
-              healthy: { type: boolean, description: SMART overall assessment }
-              power_on_hours: { type: integer }
-              media_errors: { type: integer }
-        filesystems:
-          type: array
-          items:
-            type: object
-            properties:
-              host: { type: string, description: Host or VM }
-              mountpoint: { type: string }
-              device: { type: string }
-              fstype: { type: string }
-              size_bytes: { type: integer }
-              used_bytes: { type: integer }
-              used_percent: { type: number, description: "Like df: of the space usable without root's reserve" }
-        osds:
-          type: array
-          items:
-            type: object
-            properties:
-              id: { type: integer }
-              host: { type: string }
-              device: { type: string }
-              device_class: { type: string }
-              size_bytes: { type: integer }
-              used_bytes: { type: integer }
-              used_percent: { type: number }
-              up: { type: boolean }
-              in: { type: boolean }
+        disks: { type: array, items: { $ref: "#/components/schemas/Disk" } }
+        filesystems: { type: array, items: { $ref: "#/components/schemas/Filesystem" } }
+        osds: { type: array, items: { $ref: "#/components/schemas/OSD" } }
         errors: { type: array, items: { type: string } }
     S3Status:
       type: object
@@ -644,18 +829,7 @@ components:
               host: { type: string }
               up: { type: boolean }
         users: { type: integer, description: Not counting the API's own read-only user }
-        buckets:
-          type: array
-          items:
-            type: object
-            properties:
-              name: { type: string }
-              owner: { type: string }
-              objects: { type: integer }
-              size_bytes: { type: integer }
-              quota_bytes: { type: integer, description: 0 means no quota }
-              quota_objects: { type: integer, description: 0 means no quota }
-              created: { type: string, format: date-time }
+        buckets: { type: integer }
         objects: { type: integer }
         size_bytes: { type: integer, description: What the buckets hold (one copy) }
         pool:
@@ -667,6 +841,55 @@ components:
             used_percent: { type: number }
         cert_expires: { type: string, format: date-time }
         errors: { type: array, items: { type: string } }
+    Disk:
+      type: object
+      properties:
+        host: { type: string }
+        device: { type: string, description: "nvme0, sda" }
+        type: { type: string, enum: [nvme, ssd, hdd] }
+        model: { type: string }
+        serial: { type: string }
+        role: { type: string, description: '"system", "data", "osd.N" or empty when unknown' }
+        size_bytes: { type: integer }
+        used_bytes: { type: integer, description: "The OSD's usage, or the filesystems on the disk's partitions" }
+        used_percent: { type: number }
+        wear_percent: { type: number, description: NVMe endurance used; absent for HDDs }
+        temperature_c: { type: number }
+        healthy: { type: boolean, description: SMART overall assessment }
+        power_on_hours: { type: integer }
+        media_errors: { type: integer }
+    Filesystem:
+      type: object
+      properties:
+        host: { type: string, description: Host or VM }
+        mountpoint: { type: string }
+        device: { type: string }
+        fstype: { type: string }
+        size_bytes: { type: integer }
+        used_bytes: { type: integer }
+        used_percent: { type: number, description: "Like df: of the space usable without root's reserve" }
+    OSD:
+      type: object
+      properties:
+        id: { type: integer }
+        host: { type: string }
+        device: { type: string }
+        device_class: { type: string }
+        size_bytes: { type: integer }
+        used_bytes: { type: integer }
+        used_percent: { type: number }
+        up: { type: boolean }
+        in: { type: boolean }
+    S3Bucket:
+      type: object
+      properties:
+        name: { type: string }
+        owner: { type: string }
+        objects: { type: integer }
+        size_bytes: { type: integer }
+        quota_bytes: { type: integer, description: 0 means no quota }
+        quota_objects: { type: integer, description: 0 means no quota }
+        created: { type: string, format: date-time }
     RestartPlan:
       type: object
       properties:
@@ -704,3 +927,17 @@ components:
               name: { type: string, description: "hosts, units, vms, nodes, ceph, vips, disks, s3, tunnel, monitoring" }
               status: { type: string, enum: [ok, warn, fail] }
               message: { type: string }
+    Operation:
+      type: object
+      required: [id, action, target, host, token, state, started]
+      properties:
+        id: { type: string, description: The request ID of the instance that ran it }
+        action: { type: string, description: '"vm restart", "vm stop", "vm start", "node cordon", "node uncordon", "host maintenance", "host resume"' }
+        target: { type: string }
+        host: { type: string, description: The hypervisor that ran it }
+        token: { type: string, description: Name of the token that asked }
+        state: { type: string, enum: [running, succeeded, failed, unknown], description: "unknown: no end recorded within the action's time limit" }
+        started: { type: string, format: date-time }
+        finished: { type: string, format: date-time }
+        error: { type: string }
+        events: { type: array, items: { $ref: "#/components/schemas/ActionEvent" }, description: Only on a single operation }

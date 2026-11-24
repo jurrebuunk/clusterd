@@ -113,6 +113,9 @@ func preconditionf(format string, a ...any) error {
 // final event. The action keeps going when nobody reads: events then only go
 // to the journal.
 type Run struct {
+	Action, Target string
+	Started        time.Time
+
 	events chan api.ActionEvent
 	once   sync.Once
 	done   chan struct{}
@@ -135,7 +138,7 @@ func (e *Engine) now() time.Time {
 // start runs body in the background with its own deadline, independent of
 // the request, and handles events, audit and the lock.
 func (e *Engine) start(name, target string, c Caller, lk *lock, body func(ctx context.Context, emit func(string)) error, after ...func()) *Run {
-	r := &Run{events: make(chan api.ActionEvent, 256), done: make(chan struct{})}
+	r := &Run{Action: name, Target: target, Started: e.now().UTC(), events: make(chan api.ActionEvent, 256), done: make(chan struct{})}
 	log := e.Log.With("action", name, "target", target, "token", c.Token, "scope", c.Scope, "request_id", c.RequestID)
 	send := func(status, msg string) {
 		ev := api.ActionEvent{Time: e.now().UTC(), Status: status, Message: msg}

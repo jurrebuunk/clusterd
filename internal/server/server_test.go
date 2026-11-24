@@ -71,9 +71,8 @@ func TestAuth(t *testing.T) {
 		{"/v1/whoami", "", 401},
 		{"/v1/whoami", "lab_wrong", 401},
 		{"/v1/whoami", tok[auth.ScopeRead], 200},
-		{"/v1/actions/vms/x/restart", tok[auth.ScopeRead], 403},
-		{"/v1/actions/vms/x/restart", tok[auth.ScopeOperator], 404},
-		{"/v1/actions/vms/x/restart", tok[auth.ScopeManage], 404},
+		{"/v1/vms", "", 401},
+		{"/v1/operations/x", "lab_wrong", 401},
 		{"/v1/nope", "", 404},
 	}
 	for _, c := range cases {

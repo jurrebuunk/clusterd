@@ -1,4 +1,4 @@
-// Package status gathers what /v1/node and /v1/status report: this host's
+// Package status gathers what /v1/internal/node and /v1/status report: this host's
 // facts, its peers' facts, Kubernetes nodes and Ceph health.
 package status
 

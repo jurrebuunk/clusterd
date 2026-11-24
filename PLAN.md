@@ -1,7 +1,7 @@
 # Plan
 
 Where this repo is going, so I can pick it up from here. **v1 is done:**
-`v1.1.0` runs on the hgd1 cluster and on my laptop. In progress:
+`v1.2.0` runs on the hgd1 cluster. In progress:
 [step 4](#step-4-one-consistent-api-and-cli-v120).
 
 ## Goal
@@ -448,17 +448,18 @@ not the release number.
 
 **Cluster repo and docs**
 
-- [ ] Set `system.configurationRevision`; the RGW cap; pin `v1.2.0`.
-- [ ] Handbook and reference pages on the new commands and paths.
+- [x] Set `system.configurationRevision`; pin `v1.2.0`.
+- [ ] The RGW cap (`users=*; buckets=*`); until then S3 writes answer 502.
+- [x] Handbook and reference pages on the new commands and paths.
 
 **Done when**
 
 - [x] Every old command has a new form and the old ones are gone.
-- [ ] `labctl op list` shows the last day's actions with who and result.
-- [ ] `labctl host list` shows the same commit on every host after a deploy.
+- [x] `labctl op list` shows the last day's actions with who and result.
+- [x] `labctl host list` shows the same commit on every host after a deploy.
 - [ ] A bucket and a user created, used with `aws s3`, and deleted again,
       only through `labctl`.
-- [ ] `v1.2.0` released and deployed.
+- [x] `v1.2.0` released and deployed.
 
 ### Later
 

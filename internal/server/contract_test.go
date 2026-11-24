@@ -179,6 +179,8 @@ func TestContractResponses(t *testing.T) {
 		{"GET", "/v1/s3", "S3Status"},
 		{"GET", "/v1/s3/buckets", "BucketList"},
 		{"GET", "/v1/s3/buckets/backups", "S3Bucket"},
+		{"GET", "/v1/s3/users", "S3UserList"},
+		{"GET", "/v1/s3/users/app", "S3User"},
 		{"GET", "/v1/operations", "OperationList"},
 		{"GET", "/v1/operations/aaaaaaaaaaaaaaaa", "Operation"},
 		{"POST", "/v1/vms/w1/stop?dry_run=true", "RestartPlan"},

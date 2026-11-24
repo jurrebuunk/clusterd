@@ -4,9 +4,13 @@ package fakestore
 
 import (
 	"encoding/json"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 )
 
 type series struct {
@@ -115,31 +119,183 @@ func Store() *httptest.Server {
 	}))
 }
 
-// RGW is a fake gateway admin API with two buckets and two users (plus the
-// API's own user). It checks only that a SigV4 header is present.
-func RGW() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
-			w.WriteHeader(http.StatusForbidden)
+// FakeRGW is a gateway with an admin API and enough of the S3 API to create
+// a bucket: users app and jurre (plus the API's own clusterd), buckets
+// backups (app, 40 objects, 4 GB quota) and media (jurre). It checks only
+// that a SigV4 header is present.
+type FakeRGW struct {
+	*httptest.Server
+	mu      sync.Mutex
+	users   map[string]*fakeUser
+	buckets map[string]*fakeBucket
+	keyN    int
+}
+
+type fakeUser struct {
+	keys []map[string]string
+}
+
+type fakeBucket struct {
+	owner, created string
+	size, objects  int64
+	multimeta      int64 // objects of an unfinished multipart upload
+	quota          map[string]any
+}
+
+// RGW starts a FakeRGW.
+func RGW() *FakeRGW {
+	f := &FakeRGW{users: map[string]*fakeUser{}, buckets: map[string]*fakeBucket{}}
+	for _, u := range []string{"app", "clusterd", "jurre"} {
+		f.users[u] = &fakeUser{keys: []map[string]string{f.newKey(u)}}
+	}
+	f.buckets["backups"] = &fakeBucket{owner: "app", created: "2026-11-23T10:00:00.000000Z", size: 2000000000, objects: 40,
+		quota: map[string]any{"enabled": true, "max_size": 4000000000, "max_objects": -1}}
+	f.buckets["media"] = &fakeBucket{owner: "jurre", created: "2026-11-22T10:00:00.000000Z", size: 1000000000, objects: 10, multimeta: 1,
+		quota: map[string]any{"enabled": false, "max_size": -1, "max_objects": -1}}
+	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
+	return f
+}
+
+func (f *FakeRGW) newKey(uid string) map[string]string {
+	f.keyN++
+	return map[string]string{"user": uid, "access_key": fmt.Sprintf("AK%d", f.keyN), "secret_key": fmt.Sprintf("SK%d", f.keyN)}
+}
+
+// Bucket reports a bucket's owner and quota setting, for tests.
+func (f *FakeRGW) Bucket(name string) (owner string, quota map[string]any, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.buckets[name]
+	if !ok {
+		return "", nil, false
+	}
+	return b.owner, b.quota, true
+}
+
+// UserKeys lists a user's access keys, for tests.
+func (f *FakeRGW) UserKeys(uid string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	if u, ok := f.users[uid]; ok {
+		for _, k := range u.keys {
+			out = append(out, k["access_key"])
+		}
+	}
+	return out
+}
+
+func (f *FakeRGW) serve(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	q := r.URL.Query()
+	w.Header().Set("Content-Type", "application/json")
+	fail := func(code int, c string) {
+		w.WriteHeader(code)
+		json.NewEncoder(w).Encode(map[string]string{"Code": c})
+	}
+	switch {
+	case r.URL.Path == "/admin/bucket" && r.Method == http.MethodGet:
+		out := []map[string]any{}
+		for _, name := range slices.Sorted(maps.Keys(f.buckets)) {
+			b := f.buckets[name]
+			usage := map[string]any{"rgw.main": map[string]any{"size_actual": b.size, "num_objects": b.objects}}
+			if b.multimeta > 0 {
+				usage["rgw.multimeta"] = map[string]any{"size_actual": 0, "num_objects": b.multimeta}
+			}
+			out = append(out, map[string]any{"bucket": name, "owner": b.owner, "creation_time": b.created, "usage": usage, "bucket_quota": b.quota})
+		}
+		json.NewEncoder(w).Encode(out)
+	case r.URL.Path == "/admin/bucket" && r.Method == http.MethodPut && q.Has("quota"):
+		b, ok := f.buckets[q.Get("bucket")]
+		if !ok || b.owner != q.Get("uid") {
+			fail(http.StatusNotFound, "NoSuchBucket")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/admin/bucket":
-			json.NewEncoder(w).Encode([]map[string]any{
-				{"bucket": "backups", "owner": "app", "creation_time": "2026-11-23T10:00:00.000000Z",
-					"usage":        map[string]any{"rgw.main": map[string]any{"size_actual": 2000000000, "num_objects": 40}},
-					"bucket_quota": map[string]any{"enabled": true, "max_size": 4000000000, "max_objects": -1}},
-				{"bucket": "media", "owner": "jurre", "creation_time": "2026-11-22T10:00:00.000000Z",
-					"usage":        map[string]any{"rgw.main": map[string]any{"size_actual": 1000000000, "num_objects": 10}, "rgw.multimeta": map[string]any{"size_actual": 0, "num_objects": 1}},
-					"bucket_quota": map[string]any{"enabled": false, "max_size": -1, "max_objects": -1}},
-			})
-		case "/admin/metadata/user":
-			json.NewEncoder(w).Encode([]string{"app", "clusterd", "jurre"})
+		var quota map[string]any
+		json.NewDecoder(r.Body).Decode(&quota)
+		b.quota = quota
+	case r.URL.Path == "/admin/bucket" && r.Method == http.MethodDelete:
+		b, ok := f.buckets[q.Get("bucket")]
+		switch {
+		case !ok:
+			fail(http.StatusNotFound, "NoSuchBucket")
+		case b.objects > 0 && q.Get("purge-objects") != "true":
+			fail(http.StatusConflict, "BucketNotEmpty")
 		default:
-			w.WriteHeader(http.StatusNotFound)
+			delete(f.buckets, q.Get("bucket"))
 		}
-	}))
+	case r.URL.Path == "/admin/metadata/user":
+		json.NewEncoder(w).Encode(slices.Sorted(maps.Keys(f.users)))
+	case r.URL.Path == "/admin/user" && q.Has("key"):
+		u, ok := f.users[q.Get("uid")]
+		if !ok {
+			fail(http.StatusNotFound, "NoSuchUser")
+			return
+		}
+		if r.Method == http.MethodPut {
+			u.keys = append(u.keys, f.newKey(q.Get("uid")))
+			json.NewEncoder(w).Encode(u.keys)
+			return
+		}
+		u.keys = slices.DeleteFunc(u.keys, func(k map[string]string) bool { return k["access_key"] == q.Get("access-key") })
+	case r.URL.Path == "/admin/user":
+		uid := q.Get("uid")
+		u, ok := f.users[uid]
+		switch r.Method {
+		case http.MethodGet:
+			if !ok {
+				fail(http.StatusNotFound, "NoSuchUser")
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"user_id": uid, "display_name": strings.ToUpper(uid), "suspended": 0,
+				"keys": u.keys, "stats": map[string]any{"size_actual": 0, "num_objects": 0}})
+		case http.MethodPut:
+			if ok {
+				fail(http.StatusConflict, "UserAlreadyExists")
+				return
+			}
+			u = &fakeUser{keys: []map[string]string{f.newKey(uid)}}
+			f.users[uid] = u
+			json.NewEncoder(w).Encode(map[string]any{"user_id": uid, "display_name": q.Get("display-name"), "keys": u.keys})
+		case http.MethodDelete:
+			if !ok {
+				fail(http.StatusNotFound, "NoSuchUser")
+				return
+			}
+			delete(f.users, uid)
+		}
+	case r.Method == http.MethodPut && strings.Count(r.URL.Path, "/") == 1:
+		// S3 CreateBucket, as the user whose access key signed it.
+		ak, _, _ := strings.Cut(strings.TrimPrefix(auth, "AWS4-HMAC-SHA256 Credential="), "/")
+		owner := ""
+		for uid, u := range f.users {
+			for _, k := range u.keys {
+				if k["access_key"] == ak {
+					owner = uid
+				}
+			}
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		switch {
+		case owner == "":
+			w.WriteHeader(http.StatusForbidden)
+		case f.buckets[name] != nil:
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, "<Error><Code>BucketAlreadyExists</Code></Error>")
+		default:
+			f.buckets[name] = &fakeBucket{owner: owner, created: "2026-11-24T10:00:00.000000Z",
+				quota: map[string]any{"enabled": false, "max_size": -1, "max_objects": -1}}
+		}
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
 }
 
 // OSDDF and OSDMetadata are canned `ceph osd df` / `ceph osd metadata` JSON.

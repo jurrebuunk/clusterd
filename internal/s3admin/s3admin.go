@@ -3,6 +3,7 @@
 package s3admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -136,7 +138,32 @@ type Client struct {
 	Now      func() time.Time
 }
 
+// StatusError is a 4xx answer: about the request (a missing user, a name
+// taken, missing caps), so the same on every gateway.
+type StatusError struct {
+	Path   string
+	Status int
+	Code   string // RGW's error code, e.g. NoSuchUser, BucketAlreadyExists
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("rgw %s: %d %s", e.Path, e.Status, e.Body)
+}
+
+// IsStatus reports whether err is an RGW answer with that HTTP status.
+func IsStatus(err error, status int) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Status == status
+}
+
 func (c *Client) get(ctx context.Context, path string, q url.Values, out any) error {
+	return c.do(ctx, http.MethodGet, path, q, nil, c.Cred, out)
+}
+
+// do sends one signed request to the first gateway that answers; 5xx and
+// connection errors try the next. out may be nil.
+func (c *Client) do(ctx context.Context, method, path string, q url.Values, body []byte, cred Credentials, out any) error {
 	var lastErr error
 	for _, gw := range c.Gateways {
 		u, err := url.Parse(strings.TrimRight(gw, "/") + path)
@@ -144,22 +171,26 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 			return err
 		}
 		u.RawQuery = q.Encode()
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		var rd io.Reader
+		if body != nil {
+			rd = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u.String(), rd)
 		if err != nil {
 			return err
 		}
-		req.Header.Set("X-Amz-Content-Sha256", sha256Hex(nil))
+		req.Header.Set("X-Amz-Content-Sha256", sha256Hex(body))
 		now := time.Now
 		if c.Now != nil {
 			now = c.Now
 		}
-		Sign(req, c.Cred, Region, "s3", now())
+		Sign(req, cred, Region, "s3", now())
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		rb, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 		resp.Body.Close()
 		if err != nil {
 			lastErr = err
@@ -169,16 +200,28 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, out any) er
 			lastErr = fmt.Errorf("%s: %s", gw, resp.Status)
 			continue
 		}
-		if resp.StatusCode != http.StatusOK {
-			// 4xx is about us (credentials, caps), the same on every gateway.
-			return fmt.Errorf("rgw admin %s: %s: %s", path, resp.Status, strings.TrimSpace(string(body[:min(len(body), 200)])))
+		if resp.StatusCode/100 != 2 {
+			var e struct {
+				Code string `json:"Code"`
+			}
+			json.Unmarshal(rb, &e)
+			if e.Code == "" {
+				// S3 API errors are XML: <Error><Code>…</Code>.
+				if _, after, ok := strings.Cut(string(rb), "<Code>"); ok {
+					e.Code, _, _ = strings.Cut(after, "</Code>")
+				}
+			}
+			return &StatusError{Path: path, Status: resp.StatusCode, Code: e.Code, Body: strings.TrimSpace(string(rb[:min(len(rb), 200)]))}
 		}
-		return json.Unmarshal(body, out)
+		if out == nil || len(rb) == 0 {
+			return nil
+		}
+		return json.Unmarshal(rb, out)
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no gateways configured")
 	}
-	return fmt.Errorf("rgw admin %s: %w", path, lastErr)
+	return fmt.Errorf("rgw %s: %w", path, lastErr)
 }
 
 // BucketStats is what /admin/bucket?stats=true says about one bucket.
@@ -213,4 +256,76 @@ func (c *Client) Buckets(ctx context.Context) ([]BucketStats, error) {
 func (c *Client) Users(ctx context.Context) ([]string, error) {
 	var out []string
 	return out, c.get(ctx, "/admin/metadata/user", url.Values{"format": {"json"}}, &out)
+}
+
+// Key is one S3 key pair of a user.
+type Key struct {
+	User      string `json:"user"`
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+}
+
+// UserInfo is /admin/user?uid=…&stats=true. It holds the user's secret keys:
+// never pass it on as is.
+type UserInfo struct {
+	UserID      string `json:"user_id"`
+	DisplayName string `json:"display_name"`
+	Suspended   int    `json:"suspended"`
+	Keys        []Key  `json:"keys"`
+	Stats       *struct {
+		SizeActual int64 `json:"size_actual"`
+		NumObjects int64 `json:"num_objects"`
+	} `json:"stats"`
+}
+
+// User returns one user with usage statistics.
+func (c *Client) User(ctx context.Context, uid string) (UserInfo, error) {
+	var u UserInfo
+	return u, c.get(ctx, "/admin/user", url.Values{"uid": {uid}, "stats": {"true"}, "format": {"json"}}, &u)
+}
+
+// CreateUser creates a user with one generated S3 key.
+func (c *Client) CreateUser(ctx context.Context, uid, displayName string) (UserInfo, error) {
+	var u UserInfo
+	q := url.Values{"uid": {uid}, "display-name": {displayName}, "key-type": {"s3"}, "generate-key": {"true"}, "format": {"json"}}
+	return u, c.do(ctx, http.MethodPut, "/admin/user", q, nil, c.Cred, &u)
+}
+
+// DeleteUser removes a user. It fails while the user owns buckets.
+func (c *Client) DeleteUser(ctx context.Context, uid string) error {
+	return c.do(ctx, http.MethodDelete, "/admin/user", url.Values{"uid": {uid}, "purge-data": {"false"}}, nil, c.Cred, nil)
+}
+
+// NewKey generates another S3 key for the user and returns all its keys.
+func (c *Client) NewKey(ctx context.Context, uid string) ([]Key, error) {
+	var keys []Key
+	q := url.Values{"key": {""}, "uid": {uid}, "key-type": {"s3"}, "generate-key": {"true"}, "format": {"json"}}
+	return keys, c.do(ctx, http.MethodPut, "/admin/user", q, nil, c.Cred, &keys)
+}
+
+// DeleteKey removes one of the user's keys.
+func (c *Client) DeleteKey(ctx context.Context, uid, accessKey string) error {
+	q := url.Values{"key": {""}, "uid": {uid}, "access-key": {accessKey}, "key-type": {"s3"}}
+	return c.do(ctx, http.MethodDelete, "/admin/user", q, nil, c.Cred, nil)
+}
+
+// CreateBucket creates a bucket through the S3 API as its owner: the admin
+// API has no bucket creation, and this way the owner is right from the start.
+func (c *Client) CreateBucket(ctx context.Context, owner Credentials, bucket string) error {
+	return c.do(ctx, http.MethodPut, "/"+url.PathEscape(bucket), nil, nil, owner, nil)
+}
+
+// DeleteBucket removes a bucket; with purge, the objects in it as well.
+func (c *Client) DeleteBucket(ctx context.Context, bucket string, purge bool) error {
+	return c.do(ctx, http.MethodDelete, "/admin/bucket", url.Values{"bucket": {bucket}, "purge-objects": {strconv.FormatBool(purge)}}, nil, c.Cred, nil)
+}
+
+// SetBucketQuota sets a size limit in bytes on a bucket; 0 removes it.
+func (c *Client) SetBucketQuota(ctx context.Context, owner, bucket string, maxBytes int64) error {
+	q := map[string]any{"enabled": maxBytes > 0, "max_size": -1, "max_size_kb": 0, "max_objects": -1}
+	if maxBytes > 0 {
+		q["max_size"], q["max_size_kb"] = maxBytes, (maxBytes+1023)/1024
+	}
+	body, _ := json.Marshal(q)
+	return c.do(ctx, http.MethodPut, "/admin/bucket", url.Values{"quota": {""}, "uid": {owner}, "bucket": {bucket}}, body, c.Cred, nil)
 }

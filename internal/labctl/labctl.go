@@ -336,6 +336,11 @@ func (e *env) confirm(question, what string, details []string) error {
 	return nil
 }
 
+func readLine(r io.Reader) (string, error) {
+	s, err := bufio.NewReader(r).ReadString('\n')
+	return strings.TrimSpace(s), err
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

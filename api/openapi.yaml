@@ -466,6 +466,28 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/BucketList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: "Create a bucket for an owner, optionally with a size quota"
+      description: |
+        Created through the S3 API with the owner's own key, so the owner is
+        right from the start.
+      x-scope: manage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/S3BucketCreate" }
+      responses:
+        "201":
+          description: Created; Location names it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Bucket" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Exists" }
+        "502": { $ref: "#/components/responses/BadGateway" }
 
   /v1/s3/buckets/{name}:
     get:
@@ -481,6 +503,124 @@ paths:
               schema: { $ref: "#/components/schemas/S3Bucket" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      summary: "Change a bucket's size quota (0 removes it)"
+      x-scope: manage
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/S3BucketUpdate" }
+      responses:
+        "200":
+          description: The bucket as it is now
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Bucket" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+    delete:
+      summary: "Delete a bucket; refused while it holds objects unless force=true"
+      x-scope: manage
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { name: force, in: query, schema: { type: boolean }, description: Delete the objects in it too }
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /v1/s3/users:
+    get:
+      summary: "Object store users with their buckets and usage (never their keys)"
+      x-scope: read
+      description: |
+        The API's own user (clusterd) is left out.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3UserList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoS3Admin" }
+    post:
+      summary: "Create a user with one key; the key is in this answer only"
+      x-scope: manage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/S3UserCreate" }
+      responses:
+        "201":
+          description: Created; Location names it. The only time the secret is shown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Credentials" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Exists" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoS3Admin" }
+
+  /v1/s3/users/{name}:
+    get:
+      summary: "One user"
+      x-scope: read
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoS3Admin" }
+    delete:
+      summary: "Delete a user; refused while it owns buckets"
+      x-scope: manage
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412": { $ref: "#/components/responses/Unsafe" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoS3Admin" }
+
+  /v1/s3/users/{name}/keys:
+    post:
+      summary: "Rotate keys: a new key, the old ones removed (whatever used them stops working)"
+      x-scope: manage
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The new key; the only time the secret is shown
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/S3Credentials" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503": { $ref: "#/components/responses/NoS3Admin" }
 
   /v1/operations:
     get:
@@ -651,6 +791,16 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Operation" }
+    Exists:
+      description: Already exists
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NoS3Admin:
+      description: This instance has no S3 admin credentials
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     BadRequest:
       description: An invalid parameter
       content:
@@ -767,6 +917,48 @@ components:
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/S3Bucket" } }
         errors: { type: array, items: { type: string } }
+    S3UserList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/S3User" } }
+        errors: { type: array, items: { type: string } }
+    S3User:
+      type: object
+      properties:
+        name: { type: string }
+        display_name: { type: string }
+        suspended: { type: boolean }
+        keys: { type: integer, description: How many keys it has; the keys themselves are never shown }
+        buckets: { type: integer }
+        objects: { type: integer }
+        size_bytes: { type: integer }
+    S3UserCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9][a-z0-9._-]{0,62}$" }
+        display_name: { type: string }
+    S3Credentials:
+      type: object
+      required: [user, access_key, secret_key, endpoint]
+      properties:
+        user: { type: string }
+        access_key: { type: string }
+        secret_key: { type: string, description: Shown once; clusterd doesn't keep it }
+        endpoint: { type: string }
+    S3BucketCreate:
+      type: object
+      required: [name, owner]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" }
+        owner: { type: string }
+        quota_bytes: { type: integer, minimum: 0, description: 0 or absent means none }
+    S3BucketUpdate:
+      type: object
+      required: [quota_bytes]
+      properties:
+        quota_bytes: { type: integer, minimum: 0, description: 0 removes the quota }
     PodList:
       type: object
       required: [items]

@@ -298,6 +298,46 @@ type S3Bucket struct {
 	Created      *time.Time `json:"created,omitempty"`
 }
 
+// S3User is one object store user (GET /v1/s3/users/{name}). Its keys are
+// never shown; only how many it has.
+type S3User struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Suspended   bool   `json:"suspended"`
+	Keys        int    `json:"keys"`
+	Buckets     int    `json:"buckets"`
+	Objects     int64  `json:"objects"`
+	SizeBytes   int64  `json:"size_bytes"`
+}
+
+// S3UserCreate is the body of POST /v1/s3/users.
+type S3UserCreate struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+// S3Credentials is a user's new key pair: the only answer that holds a
+// secret (POST /v1/s3/users and …/keys). It is not stored by clusterd.
+type S3Credentials struct {
+	User      string `json:"user"`
+	AccessKey string `json:"access_key"`
+	SecretKey string `json:"secret_key"`
+	Endpoint  string `json:"endpoint"`
+}
+
+// S3BucketCreate is the body of POST /v1/s3/buckets. A quota of 0 means none.
+type S3BucketCreate struct {
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	QuotaBytes int64  `json:"quota_bytes,omitempty"`
+}
+
+// S3BucketUpdate is the body of PATCH /v1/s3/buckets/{name}; 0 removes the
+// quota.
+type S3BucketUpdate struct {
+	QuotaBytes *int64 `json:"quota_bytes"`
+}
+
 // S3Pool is the Ceph pool holding the object data: how full the store is.
 type S3Pool struct {
 	Name          string  `json:"name"`

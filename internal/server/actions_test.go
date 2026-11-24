@@ -27,6 +27,7 @@ type actionHarness struct {
 	handler http.Handler
 	srv     *Server
 	fake    *kubefake.Kube
+	rgw     *fakestore.FakeRGW
 	cfg     *config.Config
 	tokens  map[auth.Scope]string
 	ran     []string
@@ -57,7 +58,7 @@ func newActionHarness(t *testing.T) *actionHarness {
 	cfg.Limits.PeerTimeout.Duration = time.Second
 	cfg.Limits.ProxyMaxBytes = 1 << 20
 	cfg.Limits.LogsLimit = 10
-	h.cfg = cfg
+	h.cfg, h.rgw = cfg, rgw
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	eng := &actions.Engine{
 		Cfg: cfg, Kube: h.fake, Log: log,

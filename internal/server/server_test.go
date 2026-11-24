@@ -52,7 +52,11 @@ func setup(t *testing.T) (http.Handler, map[auth.Scope]string, *[]upstreamHit) {
 }
 
 func do(h http.Handler, method, path, token string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(method, path, nil)
+	return doBody(h, method, path, token, "")
+}
+
+func doBody(h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}

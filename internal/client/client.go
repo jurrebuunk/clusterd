@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,15 +76,44 @@ func (c *Client) Send(ctx context.Context, method, path string, q url.Values) (i
 	return resp.Body, nil
 }
 
+// Call sends in as JSON (when not nil) and decodes the answer into out
+// (when not nil and there is one).
+func (c *Client) Call(ctx context.Context, method, path string, q url.Values, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+	resp, err := c.request(ctx, method, path, q, body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if out == nil || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // Request sends a request and returns the response of a 2xx answer (the
 // caller closes its body); other answers become an *APIError.
 func (c *Client) Request(ctx context.Context, method, path string, q url.Values) (*http.Response, error) {
+	return c.request(ctx, method, path, q, nil)
+}
+
+func (c *Client) request(ctx context.Context, method, path string, q url.Values, body io.Reader) (*http.Response, error) {
 	u := *c.base
 	u.Path = c.base.Path + path
 	u.RawQuery = q.Encode()
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)

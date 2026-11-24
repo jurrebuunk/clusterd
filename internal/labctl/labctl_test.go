@@ -19,6 +19,7 @@ import (
 	"github.com/jurrebuunk/clusterd/internal/api"
 	"github.com/jurrebuunk/clusterd/internal/auth"
 	"github.com/jurrebuunk/clusterd/internal/config"
+	"github.com/jurrebuunk/clusterd/internal/fakestore"
 	"github.com/jurrebuunk/clusterd/internal/kubefake"
 	"github.com/jurrebuunk/clusterd/internal/server"
 	"github.com/jurrebuunk/clusterd/internal/status"
@@ -79,7 +80,12 @@ func apiServer(t *testing.T) (string, string) {
 	t.Cleanup(store.Close)
 	tok, _ := auth.Generate()
 	tokens, _ := auth.Parse(strings.NewReader(auth.HashLine("tester", auth.ScopeManage, tok)))
-	cfg := &config.Config{Site: "lab", Host: "hv01", Hosts: []config.Host{{Name: "hv01", API: "http://x", Metrics: store.URL, Logs: store.URL}}}
+	rgw := fakestore.RGW()
+	t.Cleanup(rgw.Close)
+	cred := filepath.Join(t.TempDir(), "s3")
+	os.WriteFile(cred, []byte(`{"access_key":"AK","secret_key":"SK"}`), 0o600)
+	cfg := &config.Config{Site: "lab", Host: "hv01", Hosts: []config.Host{{Name: "hv01", API: "http://x", Metrics: store.URL, Logs: store.URL, RGW: rgw.URL}}}
+	cfg.S3.Endpoint, cfg.S3.Credentials = "https://s3.test", cred
 	cfg.Limits.RequestTimeout.Duration = 5 * time.Second
 	cfg.Limits.FollowMax.Duration = 5 * time.Second
 	cfg.Limits.ProxyMaxBytes = 1 << 20
@@ -226,6 +232,40 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("cordon: %d %q", code, out)
 	}
 	run(t, "", "node", "uncordon", "m2")
+
+	// S3: a user whose key only goes to a file, a bucket with a quota.
+	keys := filepath.Join(t.TempDir(), "web.env")
+	if code, _, errs := run(t, "", "s3", "user", "create", "web"); code != ExitUsage || !strings.Contains(errs, "--out") {
+		t.Fatalf("user create without --out: %d %q", code, errs)
+	}
+	code, out, errs = run(t, "", "s3", "user", "create", "web", "--out", keys)
+	b, _ := os.ReadFile(keys)
+	fi, _ := os.Stat(keys)
+	if code != 0 || strings.Contains(out, "SK") || !strings.Contains(string(b), "AWS_SECRET_ACCESS_KEY=SK") || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("user create: %d %q %q %q", code, out, errs, b)
+	}
+	if code, _, _ := run(t, "", "s3", "user", "create", "web2", "--out", keys); code != ExitUsage {
+		t.Fatal("overwrote a key file")
+	}
+	if code, out, errs := run(t, "", "s3", "bucket", "create", "web-assets", "--owner", "web", "--quota", "5G"); code != 0 || !strings.Contains(out, "quota 5.0G") {
+		t.Fatalf("bucket create: %d %q %q", code, out, errs)
+	}
+	if code, out, _ := run(t, "", "s3", "bucket", "quota", "web-assets", "none"); code != 0 || !strings.Contains(out, "no quota") {
+		t.Fatalf("quota none: %d %q", code, out)
+	}
+	if code, out, _ := run(t, "", "s3", "user", "list"); code != 0 || !strings.Contains(out, "web ") || strings.Contains(out, "clusterd") {
+		t.Fatalf("user list: %d %q", code, out)
+	}
+	if code, _, errs := run(t, "", "s3", "user", "delete", "web", "--yes"); code != ExitAPI || !strings.Contains(errs, "owns buckets") {
+		t.Fatalf("delete an owner: %d %q", code, errs)
+	}
+	if code, _, _ := run(t, "", "s3", "bucket", "delete", "web-assets"); code != ExitUsage {
+		t.Fatal("deleted without a terminal or --yes")
+	}
+	run(t, "", "s3", "bucket", "delete", "web-assets", "--yes")
+	if code, out, errs := run(t, "", "s3", "user", "delete", "web", "--yes"); code != 0 || !strings.Contains(out, "deleted") {
+		t.Fatalf("user delete: %d %q %q", code, out, errs)
+	}
 
 	// Without waiting: the operation, named.
 	if code, out, errs := run(t, "", "vm", "restart", "w1", "--yes", "--no-wait"); code != 0 || !strings.HasPrefix(out, "operation/") {
@@ -474,6 +514,19 @@ func TestAge(t *testing.T) {
 	} {
 		if got := age(d); got != want {
 			t.Errorf("age(%v) = %s, want %s", d, got, want)
+		}
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for in, want := range map[string]int64{"10G": 10e9, "1.5T": 1.5e12, "500M": 500e6, "10Gi": 10 << 30, "512MiB": 512 << 20, "100": 100} {
+		if got, err := parseSize(in); err != nil || got != want {
+			t.Errorf("parseSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "G", "-1G", "ten"} {
+		if _, err := parseSize(bad); err == nil {
+			t.Errorf("parseSize(%q) accepted", bad)
 		}
 	}
 }

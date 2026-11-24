@@ -188,7 +188,8 @@ func cmdS3(e *env) *cobra.Command {
 			})
 		},
 	})
-	c.AddCommand(b)
+	bucketWrites(e, b)
+	c.AddCommand(b, cmdS3User(e))
 	return c
 }
 

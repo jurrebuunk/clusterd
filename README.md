@@ -25,27 +25,28 @@ that cordons, drains, restarts and uncordons, one at a time).
 ```sh
 nix run github:jurrebuunk/clusterd#labctl -- --help     # or a binary from Releases
 
-labctl login                      # asks for a token, checks it, stores it (600)
-labctl status                     # hosts, VMs, k3s, Ceph, VIP owners
-labctl metrics query 'up == 0'
-labctl metrics range 'node_load1' --since 6h
-labctl logs --host hgd1-hv01 --unit ceph-osd-0.service --since 2h
-labctl logs --follow --host hgd1-fw01
-labctl --json status | jq .ceph
-labctl status disk                       # one part: host, vm, node, ceph, vip, disk, s3
+labctl auth login                        # asks for a token, checks it, stores it (600)
+labctl status                            # hosts, VMs, k3s, Ceph, VIPs, disks, S3
+labctl health                            # one verdict per area; exit 5 unless ok
+labctl host list                         # a noun, then a verb: vm, node, pod, osd, disk, fs, vip, s3 …
 labctl vm restart hgd1-k8w01             # plan, confirm, progress (operator scope)
+labctl operation list                    # what ran, for whom, how it ended
+labctl s3 user create my-app --out my-app.env
+labctl metrics query 'up == 0'
+labctl logs --host hgd1-hv01 --unit 'ceph-osd*' --since 2h
+labctl -o json status | jq .ceph         # -o table|json|name, anywhere on the line
 source <(labctl completion bash)         # zsh and fish too; Nix installs them
 ```
 
-Sites are contexts (`labctl use`, `--site`, `LABCTL_SITE`); a site without
+Sites are contexts (`labctl site use`, `--site`, `LABCTL_SITE`); a site without
 config is `hgd1` at `https://api.lan.buunk.org`. Exit codes: 0 ok, 1 API
 error, 2 usage, 3 unreachable (check WARP), 4 token missing, invalid or not
-allowed.
+allowed, 5 `labctl health` not ok.
 
 ## Tokens
 
 ```sh
-labctl token new --name laptop-jurre --scope manage --out ~/.config/labctl/tokens/hgd1
+labctl auth token create --name laptop-jurre --scope manage --out ~/.config/labctl/tokens/hgd1
 ```
 
 prints the line `laptop-jurre manage sha256:…` for the hosts' token file
@@ -56,7 +57,7 @@ the file, never to the terminal. Scopes nest: `read` ⊂ `operator` ⊂ `manage`
 
 ```nix
 inputs.clusterd = {
-  url = "github:jurrebuunk/clusterd/v1.0.0";
+  url = "github:jurrebuunk/clusterd/v2.0.0";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 # modules = [ clusterd.nixosModules.clusterd ];
